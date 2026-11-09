@@ -1,403 +1,266 @@
 
-import os
-import re
-import smtplib
-import ssl
-import hmac
-import random
-
-from pathlib import Path
-from email.message import EmailMessage
-from email.utils import formataddr, parseaddr
-
-from flask import (
-    Flask, jsonify, redirect, render_template,
-    request, session, url_for
-)
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-app = Flask(
-    __name__,
-    template_folder=str(PROJECT_ROOT / "templates"),
-    static_folder=str(PROJECT_ROOT / "static"),
-    static_url_path="/static"
-)
-
-app.secret_key = os.environ.get(
-    "SESSION_SECRET",
-    "local-development-only-change-this"
-)
-
-app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=os.environ.get("VERCEL", "").lower() == "1",
-    SESSION_COOKIE_SAMESITE="Lax",
-    MAX_CONTENT_LENGTH=1024 * 1024
-)
-
-MAX_RECIPIENTS = 25
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 465
-
-
-def json_error(message, status=400):
-    return jsonify({"error": message}), status
-
-
-def valid_email(value):
-    if not isinstance(value, str) or len(value) > 254:
-        return False
-
-    value = value.strip()
-
-    if not value or any(ch.isspace() for ch in value):
-        return False
-
-    _, address = parseaddr(value)
-
-    if address != value or "@" not in address:
-        return False
-
-    local, domain = address.rsplit("@", 1)
-
-    return bool(
-        local
-        and "." in domain
-        and not domain.startswith(".")
-        and not domain.endswith(".")
-    )
-
-
-def expand_spintax(text):
-    pattern = re.compile(r"\{([^{}]+)\}")
-
-    return pattern.sub(
-        lambda match: random.choice(
-            match.group(1).split("|")
-        ),
-        text
-    )
-
-
-def recipient_address(item):
-    if isinstance(item, str):
-        return item.strip()
-
-    if isinstance(item, dict):
-        return str(item.get("email", "")).strip()
-
-    return ""
-
-
-def build_email(
-    sender_email,
-    sender_name,
-    recipient,
-    subject,
-    body,
-    html_mode
-):
-    local_name = recipient.split("@", 1)[0]
-
-    personalized_body = (
-        body.replace("{{name}}", local_name)
-        .replace("{{email}}", recipient)
-    )
-
-    personalized_body = expand_spintax(personalized_body)
-    personalized_subject = expand_spintax(subject)
-
-    message = EmailMessage()
-
-    message["Subject"] = personalized_subject
-
-    message["From"] = (
-        formataddr((sender_name, sender_email))
-        if sender_name else sender_email
-    )
-
-    message["To"] = recipient
-
-    if html_mode:
-        message.set_content(
-            "This message contains an HTML version."
-        )
-
-        message.add_alternative(
-            personalized_body,
-            subtype="html"
-        )
-    else:
-        message.set_content(personalized_body)
-
-    return message
-
-
-@app.get("/")
-def home():
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
-
-    return render_template("index.html")
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-
-    if request.method == "GET":
-
-        if session.get("logged_in"):
-            return redirect(url_for("home"))
-
-        return render_template("login.html")
-
-    supplied_password = request.form.get(
-        "password", ""
-    )
-
-    configured_password = os.environ.get(
-        "LOGIN_PASSWORD", ""
-    )
-
-    if not configured_password:
-        return render_template(
-            "login.html",
-            error="LOGIN_PASSWORD is not configured in Vercel."
-        ), 500
-
-    if not hmac.compare_digest(
-        supplied_password,
-        configured_password
-    ):
-        return render_template(
-            "login.html",
-            error="Incorrect workspace password."
-        ), 401
-
-    session.clear()
-    session["logged_in"] = True
-
-    return redirect(url_for("home"))
-
-
-@app.route("/logout", methods=["GET", "POST"])
-def logout():
-
-    session.clear()
-
-    return redirect(url_for("login"))
-
-
-@app.post("/send-batch")
-def send_batch():
-
-    if not session.get("logged_in"):
-        return json_error(
-            "Your session has expired. Please sign in again.",
-            401
-        )
-
-    data = request.get_json(silent=True)
-
-    if not isinstance(data, dict):
-        return json_error(
-            "A valid JSON request body is required."
-        )
-
-    sender_email = str(
-        data.get("senderEmail")
-        or data.get("gmail")
-        or ""
-    ).strip().lower()
-
-    app_password = str(
-        data.get("appPassword")
-        or data.get("app_password")
-        or ""
-    ).strip().replace(" ", "")
-
-    sender_name = str(
-        data.get("senderName")
-        or data.get("sender_name")
-        or ""
-    ).strip()[:100]
-
-    subject = str(
-        data.get("subject") or ""
-    ).strip()
-
-    body = str(data.get("body") or "")
-
-    html_mode = bool(
-        data.get(
-            "htmlMode",
-            data.get("is_html", False)
-        )
-    )
-
-    consent = (
-        data.get(
-            "consentConfirmed",
-            data.get("consent_confirmed", False)
-        ) is True
-    )
-
-    raw_recipients = data.get("recipients", [])
-
-    if (
-        not sender_email.endswith("@gmail.com")
-        or not valid_email(sender_email)
-    ):
-        return json_error(
-            "Please enter a valid @gmail.com sender address."
-        )
-
-    if not app_password:
-        return json_error("Google App Password is required.")
-
-    if not subject:
-        return json_error("Email subject is required.")
-
-    if not body.strip():
-        return json_error("Message body is required.")
-
-    if not consent:
-        return json_error(
-            "Confirm that all recipients agreed to receive this email."
-        )
-
-    if not isinstance(raw_recipients, list):
-        return json_error(
-            "Recipients must be provided as a list."
-        )
-
-    recipients = []
-    seen = set()
-
-    for item in raw_recipients:
-
-        address = recipient_address(item)
-
-        if address and address.lower() not in seen:
-
-            seen.add(address.lower())
-            recipients.append(address)
-
-    if not recipients:
-        return json_error(
-            "Please provide at least one recipient email address."
-        )
-
-    if len(recipients) > MAX_RECIPIENTS:
-        return json_error(
-            "A maximum of 25 recipients is allowed per request."
-        )
-
-    invalid = [
-        address
-        for address in recipients
-        if not valid_email(address)
-    ]
-
-    if invalid:
-        return json_error(
-            "Invalid recipient email address: "
-            + ", ".join(invalid[:5])
-        )
-
-    results = []
-    tls_context = ssl.create_default_context()
-
-    try:
-
-        with smtplib.SMTP_SSL(
-            SMTP_HOST,
-            SMTP_PORT,
-            context=tls_context,
-            timeout=30
-        ) as smtp:
-
-            smtp.login(sender_email, app_password)
-
-            for recipient in recipients:
-
-                try:
-
-                    message = build_email(
-                        sender_email=sender_email,
-                        sender_name=sender_name,
-                        recipient=recipient,
-                        subject=subject,
-                        body=body,
-                        html_mode=html_mode
-                    )
-
-                    smtp.send_message(message)
-
-                    results.append({
-                        "status": "sent",
-                        "email": recipient,
-                        "detail": "Accepted by Gmail for sending."
-                    })
-
-                except Exception as exc:
-
-                    results.append({
-                        "status": "failed",
-                        "email": recipient,
-                        "detail": (
-                            f"Sending failed: {str(exc)[:250]}"
-                        )
-                    })
-
-    except smtplib.SMTPAuthenticationError:
-
-        results = [
-            {
-                "status": "failed",
-                "email": recipient,
-                "detail": (
-                    "Gmail authentication failed. "
-                    "Check Gmail address and Google App Password."
-                )
-            }
-            for recipient in recipients
-        ]
-
-    except Exception as exc:
-
-        results = [
-            {
-                "status": "failed",
-                "email": recipient,
-                "detail": (
-                    f"Could not connect to Gmail SMTP: {str(exc)[:200]}"
-                )
-            }
-            for recipient in recipients
-        ]
-
-    return jsonify({"results": results}), 200
-
-
-@app.errorhandler(413)
-def request_too_large(error):
-
-    return json_error(
-        "Request is too large.",
-        413
-    )
-
-
-@app.errorhandler(500)
-def internal_error(error):
-
-    return json_error(
-        "An internal server error occurred.",
-        500
-    )
-
-
-# Required Vercel Flask application entry point.
-application = app
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bulk Email Sender</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="app-title"><span class="plane">➤</span> Bulk Email Sender</div>
+  <a class="logout-btn" href="{{ url_for('logout') }}">↪ Logout</a>
+</header>
+
+<main class="dashboard">
+  <section class="card compose">
+    <h2>🖉 Compose Message</h2>
+
+    <div class="two-col">
+      <div>
+        <label for="senderName">Sender Name</label>
+        <input id="senderName" placeholder="Your name" maxlength="100">
+      </div>
+      <div>
+        <label for="senderEmail">Your Gmail</label>
+        <input id="senderEmail" type="email" placeholder="your@gmail.com"
+               autocomplete="username" required>
+      </div>
+      <div>
+        <label for="appPassword">App Password</label>
+        <div class="password-wrap">
+          <input id="appPassword" type="password"
+                 placeholder="Google App Password"
+                 autocomplete="current-password" required>
+          <button type="button" id="togglePassword"
+                  aria-label="Show or hide password">◉</button>
+        </div>
+        <small>Use your Google App Password, not your normal account password.</small>
+      </div>
+      <div>
+        <label for="subject">Email Subject</label>
+        <input id="subject" placeholder="Email subject" maxlength="200" required>
+      </div>
+    </div>
+
+    <div class="body-heading">
+      <label for="messageBody">Message Body</label>
+      <div class="mode-switch">
+        <button type="button" class="mode active" data-mode="plain">Plain Text</button>
+        <button type="button" class="mode" data-mode="html">HTML</button>
+      </div>
+    </div>
+
+    <textarea id="messageBody" class="message-body"
+              placeholder="Write your email message..." required></textarea>
+
+    <div class="info-strip">
+      <span class="shuffle">⤨</span>
+      <div>
+        <strong>Spintax Enabled</strong>
+        <small>Supports {Hello|Hi|Hey} variations.</small>
+      </div>
+    </div>
+
+    <h3 class="security-heading">◈ Spam Protection</h3>
+    <div class="consent-row">
+      <input id="consent" type="checkbox">
+      <label for="consent">I confirm these recipients have agreed to receive this email.</label>
+    </div>
+    <p class="help-text">Only send messages to recipients who have consented.</p>
+    <p class="help-text">The App Password remains in this form after sending. It is not saved to browser storage.</p>
+  </section>
+
+  <div class="right-column">
+    <section class="card recipients-card">
+      <div class="section-heading">
+        <div>
+          <h2>♟ Recipients</h2>
+          <p>Paste emails (comma separated, new lines, or Excel copy)</p>
+        </div>
+        <span id="foundBadge" class="badge">0 found</span>
+      </div>
+      <textarea id="recipients" class="recipient-input"
+                placeholder="person@example.com&#10;another@example.com"></textarea>
+      <small>Maximum 25 recipients per batch.</small>
+    </section>
+
+    <section class="card progress-card">
+      <h2>◔ Progress Monitor</h2>
+      <div class="stats-grid">
+        <div class="stat"><span>TOTAL</span><strong id="total">0</strong></div>
+        <div class="stat"><span>SENT</span><strong class="green" id="sent">0</strong></div>
+        <div class="stat"><span>FAILED</span><strong class="red" id="failed">0</strong></div>
+        <div class="stat"><span>REMAINING</span><strong class="orange" id="remaining">0</strong></div>
+      </div>
+
+      <div class="progress-track"><div id="progressBar"></div></div>
+      <p id="status" class="status" role="status">Ready to send</p>
+
+      <div class="action-row">
+        <button id="sendBtn" class="send-btn" type="button">➤ Send All</button>
+        <button id="stopBtn" class="stop-btn" type="button" disabled>■ Stop Sending</button>
+      </div>
+      <div id="results" class="results"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let mode = "plain";
+  let busy = false;
+  let stopped = false;
+
+  $("togglePassword").addEventListener("click", () => {
+    const field = $("appPassword");
+    field.type = field.type === "password" ? "text" : "password";
+  });
+
+  document.querySelectorAll(".mode").forEach(button => {
+    button.addEventListener("click", () => {
+      mode = button.dataset.mode;
+      document.querySelectorAll(".mode").forEach(item => {
+        item.classList.toggle("active", item === button);
+      });
+    });
+  });
+
+  function getRecipients() {
+    return [...new Set(
+      $("recipients").value
+        .split(/[\n,;\t]+/)
+        .map(value => value.trim())
+        .filter(Boolean)
+    )];
+  }
+
+  function updateFound() {
+    $("foundBadge").textContent = `${getRecipients().length} found`;
+  }
+
+  $("recipients").addEventListener("input", updateFound);
+
+  function showResult(item) {
+    const row = document.createElement("div");
+    row.className = `result-row ${item.status}`;
+    row.textContent =
+      `${item.status.toUpperCase()} — ${item.email}: ${item.detail}`;
+    $("results").prepend(row);
+  }
+
+  $("stopBtn").addEventListener("click", () => {
+    stopped = true;
+    $("status").textContent =
+      "Stop requested. The current SMTP request may still finish.";
+    $("stopBtn").disabled = true;
+  });
+
+  $("sendBtn").addEventListener("click", async () => {
+    if (busy) return;
+
+    const recipients = getRecipients();
+    const senderEmail = $("senderEmail").value.trim();
+    const appPassword = $("appPassword").value.trim();
+    const senderName = $("senderName").value.trim();
+    const subject = $("subject").value.trim();
+    const body = $("messageBody").value.trim();
+
+    if (!senderEmail || !appPassword || !subject || !body || !recipients.length) {
+      $("status").textContent =
+        "Fill in Gmail, App Password, recipients, subject, and message.";
+      return;
+    }
+
+    if (recipients.length > 25) {
+      $("status").textContent = "Maximum 25 recipients per batch.";
+      return;
+    }
+
+    if (!$("consent").checked) {
+      $("status").textContent = "Confirm recipient permission first.";
+      return;
+    }
+
+    busy = true;
+    stopped = false;
+    $("sendBtn").disabled = true;
+    $("stopBtn").disabled = false;
+    $("results").replaceChildren();
+
+    let sent = 0;
+    let failed = 0;
+    let processed = 0;
+
+    $("total").textContent = recipients.length;
+    $("sent").textContent = "0";
+    $("failed").textContent = "0";
+    $("remaining").textContent = recipients.length;
+    $("progressBar").style.width = "0%";
+    $("status").textContent = "Sending…";
+
+    try {
+      for (let start = 0; start < recipients.length; start += 8) {
+        if (stopped) break;
+
+        const batch = recipients.slice(start, start + 8);
+
+        const response = await fetch("/send-batch", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            recipients: batch,
+            senderEmail,
+            appPassword,
+            senderName,
+            subject,
+            body,
+            htmlMode: mode === "html",
+            consentConfirmed: $("consent").checked
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Sending request failed.");
+        }
+
+        for (const item of data.results || []) {
+          showResult(item);
+          if (item.status === "sent") sent++;
+          else failed++;
+          processed++;
+        }
+
+        $("sent").textContent = sent;
+        $("failed").textContent = failed;
+        $("remaining").textContent = recipients.length - processed;
+        $("progressBar").style.width =
+          `${Math.round(processed / recipients.length * 100)}%`;
+        $("status").textContent =
+          `Processed ${processed} of ${recipients.length}`;
+      }
+
+      $("status").textContent = stopped
+        ? `Stopped. SMTP accepted: ${sent}; failed: ${failed}.`
+        : `Finished. SMTP accepted: ${sent}; failed: ${failed}.`;
+
+    } catch (error) {
+      $("status").textContent = `Error: ${error.message}`;
+
+    } finally {
+      busy = false;
+      $("sendBtn").disabled = false;
+      $("stopBtn").disabled = true;
+
+      // FIX: App Password ko clear nahi karna.
+      // Isliye sending ke baad field ki value bani rahegi.
+    }
+  });
+})();
+</script>
+</body>
+</html>
