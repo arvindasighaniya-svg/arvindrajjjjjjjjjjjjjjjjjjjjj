@@ -1,14 +1,14 @@
-
 import os
 import re
 import smtplib
 import ssl
 import hmac
 import random
+import time
 
 from pathlib import Path
 from email.message import EmailMessage
-from email.utils import formataddr, parseaddr
+from email.utils import formataddr, parseaddr, make_msgid
 
 from flask import (
     Flask, jsonify, redirect, render_template,
@@ -96,7 +96,8 @@ def build_email(
     recipient,
     subject,
     body,
-    html_mode
+    html_mode,
+    unsubscribe_email=""
 ):
     local_name = recipient.split("@", 1)[0]
 
@@ -118,6 +119,12 @@ def build_email(
     )
 
     message["To"] = recipient
+    
+    # Spam-prevention headers
+    message["Message-ID"] = make_msgid(domain=sender_email.split("@")[1])
+    
+    if unsubscribe_email:
+        message["List-Unsubscribe"] = f"<mailto:{unsubscribe_email}?subject=unsubscribe>"
 
     if html_mode:
         message.set_content(
@@ -320,9 +327,12 @@ def send_batch():
 
             smtp.login(sender_email, app_password)
 
-            for recipient in recipients:
+            for index, recipient in enumerate(recipients):
 
                 try:
+                    # Throttling/Delay to prevent triggering Gmail's rapid-fire spam detector
+                    if index > 0:
+                        time.sleep(random.uniform(0.30, 0.95))
 
                     message = build_email(
                         sender_email=sender_email,
@@ -330,7 +340,8 @@ def send_batch():
                         recipient=recipient,
                         subject=subject,
                         body=body,
-                        html_mode=html_mode
+                        html_mode=html_mode,
+                        unsubscribe_email=sender_email
                     )
 
                     smtp.send_message(message)
