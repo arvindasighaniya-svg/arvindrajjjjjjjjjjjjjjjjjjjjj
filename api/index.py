@@ -33,7 +33,7 @@ app.config.update(
 )
 
 MAX_RECIPIENTS = 25
-SEND_INTERVAL_SECONDS = 1.0  # modest pacing; does not bypass Gmail limits
+SEND_INTERVAL_SECONDS = 0.90  # modest pacing; does not bypass Gmail limits
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
