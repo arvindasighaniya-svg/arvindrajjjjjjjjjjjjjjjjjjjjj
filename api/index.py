@@ -170,7 +170,7 @@ def send_batch():
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
-        return jsonify({"success": False, "message": "Invalid JSON request."}), 400
+        return jsonify({"success": False, "message": "Invalid JSON request."}), 400 
 
     sender_name = clean_header(data.get("sender_name", "") or data.get("senderName", ""), 200)
     gmail = clean_header(data.get("gmail", "") or data.get("senderEmail", ""), 254)
