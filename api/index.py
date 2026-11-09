@@ -78,7 +78,7 @@ function handleEvent(e) {
 $("sendForm").addEventListener("submit", async ev=>{
   ev.preventDefault(); if(controller)return;
   const gmail=$("gmail").value.trim();
-  const lines=$("recipients").value.split(/[\n,;]+/).map(s=>s.trim()).filter(Boolean);
+  const lines=$("recipients").value.split(/[\n,;]+/).map(s=>s.trim()).filter(Boolean); 
   const recipients=lines.map(email=>({email}));
   $("recipientCount").textContent=recipients.length+" found";
   if(!gmail.toLowerCase().endsWith("@gmail.com")){$("status").textContent="Use a valid @gmail.com sender address.";return;}
