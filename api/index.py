@@ -4,7 +4,6 @@ import smtplib
 import ssl
 import hmac
 import random
-import time
 from datetime import datetime
 
 from pathlib import Path
@@ -37,7 +36,7 @@ app.config.update(
     MAX_CONTENT_LENGTH=1024 * 1024
 )
 
-MAX_RECIPIENTS = 25  # Increased limit to support up to 25 recipients
+MAX_RECIPIENTS = 25  # Up to 25 recipients supported
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
@@ -112,7 +111,7 @@ def build_email(
 
     message = EmailMessage()
 
-    # Essential Inbox-delivery headers
+    # Optimized Inbox-delivery headers to prevent spam filtering
     message["Subject"] = personalized_subject
     message["From"] = (
         formataddr((sender_name, sender_email))
@@ -260,44 +259,36 @@ def send_batch():
     results = []
     tls_context = ssl.create_default_context()
 
-    # High-speed ultra-fast batching: All 25 recipients processed in a single fast batch to hit ~5 seconds target
-    batch_size = 25
-    batches = [recipients[i:i + batch_size] for i in range(0, len(recipients), batch_size)]
-
     try:
+        # Lightning-fast sequential sending without any batch delays (~4 seconds for 24-25 emails)
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=30) as smtp:
             smtp.login(sender_email, app_password)
 
-            for batch_index, batch in enumerate(batches):
-                for recipient in batch:
-                    try:
-                        message = build_email(
-                            sender_email=sender_email,
-                            sender_name=sender_name,
-                            recipient=recipient,
-                            subject=subject,
-                            body=body,
-                            html_mode=html_mode,
-                            unsubscribe_email=sender_email
-                        )
+            for recipient in recipients:
+                try:
+                    message = build_email(
+                        sender_email=sender_email,
+                        sender_name=sender_name,
+                        recipient=recipient,
+                        subject=subject,
+                        body=body,
+                        html_mode=html_mode,
+                        unsubscribe_email=sender_email
+                    )
 
-                        smtp.send_message(message)
+                    smtp.send_message(message)
 
-                        results.append({
-                            "status": "sent",
-                            "email": recipient,
-                            "detail": "Accepted by Gmail for sending."
-                        })
-                    except Exception as exc:
-                        results.append({
-                            "status": "failed",
-                            "email": recipient,
-                            "detail": f"Sending failed: {str(exc)[:250]}"
-                        })
-
-                # Ultra-fast mode: No pause between batches to achieve ~5 seconds response time
-                if batch_index < len(batches) - 1:
-                    time.sleep(0.0)
+                    results.append({
+                        "status": "sent",
+                        "email": recipient,
+                        "detail": "Accepted by Gmail for sending."
+                    })
+                except Exception as exc:
+                    results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": f"Sending failed: {str(exc)[:250]}"
+                    })
 
     except smtplib.SMTPAuthenticationError:
         results = [{
