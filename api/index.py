@@ -295,9 +295,9 @@ def send_batch():
                             "detail": f"Sending failed: {str(exc)[:250]}"
                         })
 
-                # Small controlled pause between batches of 6 to guarantee 10-sec pacing & avoid SMTP rate limits
+                # Small controlled pause between batches of 12 to guarantee 10-sec pacing & avoid SMTP rate limits
                 if batch_index < len(batches) - 1:
-                    time.sleep(1.2)
+                    time.sleep(0.50)
 
     except smtplib.SMTPAuthenticationError:
         results = [{
