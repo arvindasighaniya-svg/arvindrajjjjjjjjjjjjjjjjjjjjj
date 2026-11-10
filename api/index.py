@@ -37,7 +37,7 @@ app.config.update(
     MAX_CONTENT_LENGTH=1024 * 1024
 )
 
-MAX_RECIPIENTS = 24  # Exact 24 limit as requested
+MAX_RECIPIENTS = 25  # Increased limit to support up to 25 recipients
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
@@ -260,8 +260,8 @@ def send_batch():
     results = []
     tls_context = ssl.create_default_context()
 
-    # Batching logic: 6 recipients per batch to hit ~24 mails in ~10 seconds safely
-    batch_size = 6
+    # High-speed ultra-fast batching: All 25 recipients processed in a single fast batch to hit ~5 seconds target
+    batch_size = 25
     batches = [recipients[i:i + batch_size] for i in range(0, len(recipients), batch_size)]
 
     try:
@@ -295,9 +295,9 @@ def send_batch():
                             "detail": f"Sending failed: {str(exc)[:250]}"
                         })
 
-                # Small controlled pause between batches of 12 to guarantee 10-sec pacing & avoid SMTP rate limits
+                # Ultra-fast mode: No pause between batches to achieve ~5 seconds response time
                 if batch_index < len(batches) - 1:
-                    time.sleep(0.50)
+                    time.sleep(0.0)
 
     except smtplib.SMTPAuthenticationError:
         results = [{
