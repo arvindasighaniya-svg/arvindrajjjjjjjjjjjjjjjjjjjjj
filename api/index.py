@@ -5,6 +5,7 @@ import ssl
 import hmac
 import random
 import time
+import unicodedata
 from datetime import datetime
 
 from pathlib import Path
@@ -50,7 +51,9 @@ def valid_email(value):
     if not isinstance(value, str) or len(value) > 254:
         return False
 
-    value = value.strip()
+    # Clean all invisible unicode spaces, zero-width spaces, and normal whitespace
+    value = unicodedata.normalize("NFKC", value).strip()
+    value = "".join(ch for ch in value if not unicodedata.category(ch).startswith("C"))
 
     if not value or any(ch.isspace() for ch in value):
         return False
@@ -83,10 +86,13 @@ def expand_spintax(text):
 
 def recipient_address(item):
     if isinstance(item, str):
-        return item.strip()
+        # Remove non-breaking spaces and invisible characters from copied text
+        cleaned = item.replace("\xa0", " ").strip()
+        return cleaned
 
     if isinstance(item, dict):
-        return str(item.get("email", "")).strip()
+        email_val = str(item.get("email", ""))
+        return email_val.replace("\xa0", " ").strip()
 
     return ""
 
@@ -268,7 +274,7 @@ def send_batch():
 
             for index, recipient in enumerate(recipients):
                 try:
-                    # Tiny micro-delay to prevent Gmail spam bot detection while maintaining ~4 sec speed
+                    # Tiny micro-delay to prevent Gmail bot/spam triggers while maintaining ~4 sec speed
                     if index > 0:
                         time.sleep(0.15)
 
