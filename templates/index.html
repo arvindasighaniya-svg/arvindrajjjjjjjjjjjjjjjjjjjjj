@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -154,7 +153,7 @@
   $("stopBtn").addEventListener("click", () => {
     stopped = true;
     $("status").textContent =
-      "Stop requested. The current SMTP request may still finish.";
+      "Stop requested. The request is currently processing.";
     $("stopBtn").disabled = true;
   });
 
@@ -190,63 +189,50 @@
     $("stopBtn").disabled = false;
     $("results").replaceChildren();
 
-    let sent = 0;
-    let failed = 0;
-    let processed = 0;
-
     $("total").textContent = recipients.length;
     $("sent").textContent = "0";
     $("failed").textContent = "0";
     $("remaining").textContent = recipients.length;
     $("progressBar").style.width = "0%";
-    $("status").textContent = "Sending…";
+    $("status").textContent = "Sending all emails instantly (Lightning Speed)…";
 
     try {
-      for (let start = 0; start < recipients.length; start += 8) {
-        if (stopped) break;
+      // FIX: Send all recipients in ONE single request without any frontend chunking loop
+      const response = await fetch("/send-batch", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          recipients: recipients,
+          senderEmail,
+          appPassword,
+          senderName,
+          subject,
+          body,
+          htmlMode: mode === "html",
+          consentConfirmed: $("consent").checked
+        })
+      });
 
-        const batch = recipients.slice(start, start + 8);
+      const data = await response.json();
 
-        const response = await fetch("/send-batch", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            recipients: batch,
-            senderEmail,
-            appPassword,
-            senderName,
-            subject,
-            body,
-            htmlMode: mode === "html",
-            consentConfirmed: $("consent").checked
-          })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error || "Sending request failed.");
-        }
-
-        for (const item of data.results || []) {
-          showResult(item);
-          if (item.status === "sent") sent++;
-          else failed++;
-          processed++;
-        }
-
-        $("sent").textContent = sent;
-        $("failed").textContent = failed;
-        $("remaining").textContent = recipients.length - processed;
-        $("progressBar").style.width =
-          `${Math.round(processed / recipients.length * 100)}%`;
-        $("status").textContent =
-          `Processed ${processed} of ${recipients.length}`;
+      if (!response.ok) {
+        throw new Error(data.error || "Sending request failed.");
       }
 
-      $("status").textContent = stopped
-        ? `Stopped. SMTP accepted: ${sent}; failed: ${failed}.`
-        : `Finished. SMTP accepted: ${sent}; failed: ${failed}.`;
+      let sent = 0;
+      let failed = 0;
+
+      for (const item of data.results || []) {
+        showResult(item);
+        if (item.status === "sent") sent++;
+        else failed++;
+      }
+
+      $("sent").textContent = sent;
+      $("failed").textContent = failed;
+      $("remaining").textContent = recipients.length - (sent + failed);
+      $("progressBar").style.width = "100%";
+      $("status").textContent = `Finished. SMTP accepted: ${sent}; failed: ${failed}.`;
 
     } catch (error) {
       $("status").textContent = `Error: ${error.message}`;
@@ -255,9 +241,6 @@
       busy = false;
       $("sendBtn").disabled = false;
       $("stopBtn").disabled = true;
-
-      // FIX: App Password ko clear nahi karna.
-      // Isliye sending ke baad field ki value bani rahegi.
     }
   });
 })();
