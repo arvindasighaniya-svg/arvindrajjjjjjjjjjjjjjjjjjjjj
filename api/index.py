@@ -111,7 +111,7 @@ def build_email(
 
     message = EmailMessage()
 
-    # Optimized Inbox-delivery headers to prevent spam filtering
+    # Advanced Inbox-delivery headers to prevent spam folder routing
     message["Subject"] = personalized_subject
     message["From"] = (
         formataddr((sender_name, sender_email))
@@ -121,14 +121,15 @@ def build_email(
     message["Reply-To"] = sender_email
     message["Message-ID"] = make_msgid(domain=sender_email.split("@")[1])
     message["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+    message["X-Mailer"] = "Python/Flask BulkSender"
     
     if unsubscribe_email:
         message["List-Unsubscribe"] = f"<mailto:{unsubscribe_email}?subject=unsubscribe>"
 
     if html_mode:
-        message.set_content(
-            "Please view this email in an HTML-compatible client."
-        )
+        # Provide clean plain text fallback alongside HTML to satisfy spam filters
+        plain_fallback = re.sub('<[^<]+?>', '', personalized_body)
+        message.set_content(plain_fallback or "Please view this email in an HTML-compatible client.")
         message.add_alternative(
             personalized_body,
             subtype="html"
@@ -260,7 +261,7 @@ def send_batch():
     tls_context = ssl.create_default_context()
 
     try:
-        # Lightning-fast sequential sending without any batch delays (~4 seconds for 24-25 emails)
+        # Ultra-fast sequential sending without batch delays (~3-4 seconds for 24-25 emails)
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=30) as smtp:
             smtp.login(sender_email, app_password)
 
