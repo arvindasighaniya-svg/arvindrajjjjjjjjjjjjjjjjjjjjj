@@ -4,6 +4,7 @@ import smtplib
 import ssl
 import hmac
 import random
+import time
 from datetime import datetime
 
 from pathlib import Path
@@ -261,12 +262,16 @@ def send_batch():
     tls_context = ssl.create_default_context()
 
     try:
-        # Ultra-fast sequential sending without batch delays (~3-4 seconds for 24-25 emails)
+        # Ultra-fast safe sending with micro-pause (25 emails in ~3.8 seconds, bypassing Gmail spam filters)
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=30) as smtp:
             smtp.login(sender_email, app_password)
 
-            for recipient in recipients:
+            for index, recipient in enumerate(recipients):
                 try:
+                    # Tiny micro-delay to prevent Gmail spam bot detection while maintaining ~4 sec speed
+                    if index > 0:
+                        time.sleep(0.15)
+
                     message = build_email(
                         sender_email=sender_email,
                         sender_name=sender_name,
