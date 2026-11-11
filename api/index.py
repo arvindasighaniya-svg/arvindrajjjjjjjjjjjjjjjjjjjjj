@@ -4,8 +4,6 @@ import smtplib
 import ssl
 import hmac
 import random
-import time
-import unicodedata
 from datetime import datetime
 
 from pathlib import Path
@@ -51,9 +49,7 @@ def valid_email(value):
     if not isinstance(value, str) or len(value) > 254:
         return False
 
-    # Clean all invisible unicode spaces, zero-width spaces, and normal whitespace
-    value = unicodedata.normalize("NFKC", value).strip()
-    value = "".join(ch for ch in value if not unicodedata.category(ch).startswith("C"))
+    value = value.strip()
 
     if not value or any(ch.isspace() for ch in value):
         return False
@@ -86,13 +82,10 @@ def expand_spintax(text):
 
 def recipient_address(item):
     if isinstance(item, str):
-        # Remove non-breaking spaces and invisible characters from copied text
-        cleaned = item.replace("\xa0", " ").strip()
-        return cleaned
+        return item.strip()
 
     if isinstance(item, dict):
-        email_val = str(item.get("email", ""))
-        return email_val.replace("\xa0", " ").strip()
+        return str(item.get("email", "")).strip()
 
     return ""
 
@@ -118,7 +111,7 @@ def build_email(
 
     message = EmailMessage()
 
-    # Advanced Inbox-delivery headers to prevent spam folder routing
+    # Optimized Inbox-delivery headers to prevent spam filtering
     message["Subject"] = personalized_subject
     message["From"] = (
         formataddr((sender_name, sender_email))
@@ -128,15 +121,14 @@ def build_email(
     message["Reply-To"] = sender_email
     message["Message-ID"] = make_msgid(domain=sender_email.split("@")[1])
     message["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-    message["X-Mailer"] = "Python/Flask BulkSender"
     
     if unsubscribe_email:
         message["List-Unsubscribe"] = f"<mailto:{unsubscribe_email}?subject=unsubscribe>"
 
     if html_mode:
-        # Provide clean plain text fallback alongside HTML to satisfy spam filters
-        plain_fallback = re.sub('<[^<]+?>', '', personalized_body)
-        message.set_content(plain_fallback or "Please view this email in an HTML-compatible client.")
+        message.set_content(
+            "Please view this email in an HTML-compatible client."
+        )
         message.add_alternative(
             personalized_body,
             subtype="html"
@@ -268,16 +260,12 @@ def send_batch():
     tls_context = ssl.create_default_context()
 
     try:
-        # Ultra-fast safe sending with micro-pause (25 emails in ~3.8 seconds, bypassing Gmail spam filters)
+        # Lightning-fast sequential sending without any batch delays (~4 seconds for 24-25 emails)
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=30) as smtp:
             smtp.login(sender_email, app_password)
 
-            for index, recipient in enumerate(recipients):
+            for recipient in recipients:
                 try:
-                    # Tiny micro-delay to prevent Gmail bot/spam triggers while maintaining ~4 sec speed
-                    if index > 0:
-                        time.sleep(0.15)
-
                     message = build_email(
                         sender_email=sender_email,
                         sender_name=sender_name,
