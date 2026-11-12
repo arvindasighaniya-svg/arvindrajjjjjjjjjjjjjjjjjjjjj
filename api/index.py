@@ -51,21 +51,16 @@ def valid_email(value):
     if not isinstance(value, str) or len(value) > 254:
         return False
 
-    # Aggressive cleaning of all invisible characters, tabs, non-breaking spaces, and unicode artifacts
-    value = unicodedata.normalize("NFKC", value)
-    value = "".join(ch for ch in value if ch.isprintable() and not ch.isspace() or ch == " ").strip()
-    value = value.replace(" ", "")  # Emails cannot contain spaces
+    # Clean hidden whitespace and invisible Unicode control characters from Excel/copy-paste
+    value = unicodedata.normalize("NFKC", value).strip()
+    value = "".join(ch for ch in value if not unicodedata.category(ch).startswith("C"))
 
-    if not value or "@" not in value:
-        return False
-
-    # Standard email regex check to guarantee absolute safety
-    email_regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
-    if not re.match(email_regex, value):
+    if not value or any(ch.isspace() for ch in value):
         return False
 
     _, address = parseaddr(value)
-    if not address or "@" not in address:
+
+    if address != value or "@" not in address:
         return False
 
     local, domain = address.rsplit("@", 1)
@@ -91,14 +86,13 @@ def expand_spintax(text):
 
 def recipient_address(item):
     if isinstance(item, str):
-        # Strip out quotes, brackets, non-breaking spaces, and invisible formatting artifacts from sheets/excel
-        cleaned = item.replace("\xa0", "").replace('"', "").replace("'", "").strip()
-        return "".join(ch for ch in cleaned if ch.isprintable() and not (ch.isspace() and ch != " "))
+        # Remove non-breaking spaces and invisible characters from text copy-pastes
+        cleaned = item.replace("\xa0", " ").strip()
+        return cleaned
 
     if isinstance(item, dict):
         email_val = str(item.get("email", ""))
-        cleaned = email_val.replace("\xa0", "").replace('"', "").replace("'", "").strip()
-        return "".join(ch for ch in cleaned if ch.isprintable() and not (ch.isspace() and ch != " "))
+        return email_val.replace("\xa0", " ").strip()
 
     return ""
 
