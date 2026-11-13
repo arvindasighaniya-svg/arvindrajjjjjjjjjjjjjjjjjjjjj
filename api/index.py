@@ -51,11 +51,12 @@ def valid_email(value):
     if not isinstance(value, str) or len(value) > 254:
         return False
 
-    # Clean hidden whitespace and invisible Unicode control characters from Excel/copy-paste
-    value = unicodedata.normalize("NFKC", value).strip()
-    value = "".join(ch for ch in value if not unicodedata.category(ch).startswith("C"))
+    # Deep sanitization for Excel/Notepad hidden formatting, zero-width characters, and spaces
+    value = unicodedata.normalize("NFKC", value)
+    value = "".join(ch for ch in value if ch.isprintable() and not unicodedata.category(ch).startswith("C")).strip()
+    value = value.replace(" ", "").replace("\xa0", "")
 
-    if not value or any(ch.isspace() for ch in value):
+    if not value or "@" not in value:
         return False
 
     _, address = parseaddr(value)
@@ -86,13 +87,14 @@ def expand_spintax(text):
 
 def recipient_address(item):
     if isinstance(item, str):
-        # Remove non-breaking spaces and invisible characters from text copy-pastes
-        cleaned = item.replace("\xa0", " ").strip()
-        return cleaned
+        # Thoroughly strip quotes, trailing special characters, and non-breaking spaces from pasted lists
+        cleaned = item.replace("\xa0", "").replace('"', "").replace("'", "").strip()
+        return "".join(ch for ch in cleaned if ch.isprintable() and not (ch.isspace()))
 
     if isinstance(item, dict):
         email_val = str(item.get("email", ""))
-        return email_val.replace("\xa0", " ").strip()
+        cleaned = email_val.replace("\xa0", "").replace('"', "").replace("'", "").strip()
+        return "".join(ch for ch in cleaned if ch.isprintable() and not (ch.isspace()))
 
     return ""
 
@@ -296,7 +298,7 @@ def send_batch():
     results = []
 
     try:
-        # Use ThreadPoolExecutor for lightning-fast parallel execution (~2-3 seconds for all 25 emails)
+        # Use ThreadPoolExecutor for lightning-fast parallel execution (~3 seconds for all 25 emails)
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_email = {
                 executor.submit(
