@@ -52,7 +52,6 @@ def valid_email(value):
     if not isinstance(value, str) or len(value) > 254:
         return False
 
-    # Clean hidden whitespace and invisible Unicode control characters from Excel/copy-paste
     value = unicodedata.normalize("NFKC", value)
     value = "".join(ch for ch in value if ch.isprintable() and not unicodedata.category(ch).startswith("C")).strip()
     value = value.replace(" ", "").replace("\xa0", "")
@@ -120,7 +119,7 @@ def build_email(
 
     message = EmailMessage()
 
-    # --- Clean, Authentic Inbox-Delivery Headers (No Spoofing) ---
+    # --- Bulletproof Inbox-Delivery Headers ---
     message["Subject"] = personalized_subject
     message["From"] = (
         formataddr((sender_name, sender_email))
@@ -131,18 +130,19 @@ def build_email(
     message["Message-ID"] = make_msgid(domain=sender_email.split("@")[1])
     message["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
     
+    # RFC standard headers to improve sender reputation and prevent spam flagging
+    message["X-Priority"] = "3"
+    message["X-MSMail-Priority"] = "Normal"
+    
     if unsubscribe_email:
         message["List-Unsubscribe"] = f"<mailto:{unsubscribe_email}?subject=unsubscribe>"
         message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
     if html_mode:
-        # Provide clean plain-text fallback alongside HTML to satisfy anti-spam filters
-        plain_fallback = re.sub('<[^<]+?>', '', personalized_body)
-        message.set_content(plain_fallback or "Please view this email in an HTML-compatible client.")
-        message.add_alternative(
-            personalized_body,
-            subtype="html"
-        )
+        # Extract clean text from HTML for the mandatory plain text alternative part
+        plain_text = re.sub('<[^<]+?>', '', personalized_body)
+        message.set_content(plain_text.strip() or "Please view this email in an HTML compatible viewer.")
+        message.add_alternative(personalized_body, subtype="html")
     else:
         message.set_content(personalized_body)
 
@@ -150,13 +150,13 @@ def build_email(
 
 
 def send_single_email(sender_email, app_password, sender_name, subject, body, html_mode, recipient):
-    """Sends a single email securely in a parallel worker thread with natural pacing."""
+    """Sends a single email securely in a parallel worker thread with precise anti-spam spacing."""
     tls_context = ssl.create_default_context()
     try:
-        # Chota sa natural micro-delay taaki Gmail ka bot-detection trigger na ho
-        time.sleep(random.uniform(0.05, 0.15))
+        # Micro-delay randomization to prevent simultaneous burst triggers on Google SMTP
+        time.sleep(random.uniform(0.1, 0.25))
 
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=20) as smtp:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=25) as smtp:
             smtp.login(sender_email, app_password)
             message = build_email(
                 sender_email=sender_email,
@@ -301,8 +301,8 @@ def send_batch():
     results = []
 
     try:
-        # Optimized ThreadPoolExecutor execution (~3-4 seconds for all 25 emails with natural pacing)
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        # Optimized ThreadPool execution balancing high-speed throughput with anti-spam deliverability
+        with ThreadPoolExecutor(max_workers=8) as executor:
             future_to_email = {
                 executor.submit(
                     send_single_email,
