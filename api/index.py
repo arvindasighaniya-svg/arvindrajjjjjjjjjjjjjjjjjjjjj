@@ -130,7 +130,7 @@ def build_email(
     message["Reply-To"] = sender_email
     message["Message-ID"] = make_msgid(domain=sender_email.split("@")[1])
     message["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-    message["X-Mailer"] = "Microsoft Outlook 16.0"  # Standard mailer signature for better inbox trust
+    message["X-Mailer"] = "Microsoft Outlook 16.0"  # Standard mailer signature for higher trust
     
     if unsubscribe_email:
         message["List-Unsubscribe"] = f"<mailto:{unsubscribe_email}?subject=unsubscribe>"
@@ -300,7 +300,7 @@ def send_batch():
 
     try:
         # Use ThreadPoolExecutor for lightning-fast parallel execution (~3 seconds for all 25 emails)
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_email = {
                 executor.submit(
                     send_single_email,
