@@ -137,7 +137,7 @@ def build_email(
 
     if html_mode:
         # Provide clean plain text fallback alongside HTML to satisfy spam filters
-        plain_fallback = re.sub('<[^<]+?>', '', personalized_body)
+        plain_fallback = re.sub(r'<[^<]+?>', '', personalized_body)
         message.set_content(plain_fallback or "Please view this email in an HTML-compatible client.")
         message.add_alternative(
             personalized_body,
