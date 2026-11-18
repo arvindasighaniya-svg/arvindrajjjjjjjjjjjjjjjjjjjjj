@@ -52,7 +52,7 @@ def valid_email(value):
     if not isinstance(value, str) or len(value) > 254:
         return False
 
-    # Clean hidden whitespace and invisible Unicode control characters from Excel/copy-paste
+    # Deep sanitization for Excel/Notepad hidden formatting and zero-width characters
     value = unicodedata.normalize("NFKC", value)
     value = "".join(ch for ch in value if ch.isprintable() and not unicodedata.category(ch).startswith("C")).strip()
     value = value.replace(" ", "").replace("\xa0", "")
@@ -154,11 +154,11 @@ def build_email(
 
 
 def send_single_email(sender_email, app_password, sender_name, subject, body, html_mode, recipient):
-    """Sends a single email securely in a parallel worker thread with natural pacing."""
+    """Sends a single email securely in a parallel worker thread with lightning-fast execution."""
     tls_context = ssl.create_default_context()
     try:
-        # Natural micro-delay to prevent triggering Gmail bot-detection rate limits
-        time.sleep(random.uniform(0.05, 0.15))
+        # Light micro-delay to prevent connection collision
+        time.sleep(random.uniform(0.02, 0.08))
 
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=20) as smtp:
             smtp.login(sender_email, app_password)
@@ -305,7 +305,7 @@ def send_batch():
     results = []
 
     try:
-        # Optimized ThreadPoolExecutor execution (~3-4 seconds for all 25 emails with natural pacing)
+        # High-speed ThreadPoolExecutor execution (~3 seconds for all 25 emails)
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_email = {
                 executor.submit(
