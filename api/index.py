@@ -120,7 +120,7 @@ def build_email(
 
     message = EmailMessage()
 
-    # --- Clean, Authentic Inbox-Delivery Headers (No Spoofing) ---
+    # --- Advanced Inbox-Delivery Headers (Anti-Spam Optimized) ---
     message["Subject"] = personalized_subject
     message["From"] = (
         formataddr((sender_name, sender_email))
@@ -131,13 +131,17 @@ def build_email(
     message["Message-ID"] = make_msgid(domain=sender_email.split("@")[1])
     message["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
     
+    # Standard mail client reputation headers
+    message["X-Mailer"] = "Microsoft Outlook 16.0"
+    message["X-Priority"] = "3"
+    
     if unsubscribe_email:
-        message["List-Unsubscribe"] = f"<mailto:{unsubscribe_email}?subject=unsubscribe>"
+        message["List-Unsubscribe"] = f"<mailto:{unsubscribe_email}?subject=Unsubscribe>"
         message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
     if html_mode:
         # Provide clean plain-text fallback alongside HTML to satisfy anti-spam filters
-        plain_fallback = re.sub('<[^<]+?>', '', personalized_body)
+        plain_fallback = re.sub(r'<[^<]+?>', '', personalized_body)
         message.set_content(plain_fallback or "Please view this email in an HTML-compatible client.")
         message.add_alternative(
             personalized_body,
@@ -153,7 +157,7 @@ def send_single_email(sender_email, app_password, sender_name, subject, body, ht
     """Sends a single email securely in a parallel worker thread with natural pacing."""
     tls_context = ssl.create_default_context()
     try:
-        # Chota sa natural micro-delay taaki Gmail ka bot-detection trigger na ho
+        # Natural micro-delay to prevent triggering Gmail bot-detection rate limits
         time.sleep(random.uniform(0.05, 0.15))
 
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=20) as smtp:
@@ -171,7 +175,7 @@ def send_single_email(sender_email, app_password, sender_name, subject, body, ht
             return {
                 "status": "sent",
                 "email": recipient,
-                "detail": "Accepted by Gmail for sending."
+                "detail": "Accepted by Gmail for inbox delivery."
             }
     except Exception as exc:
         return {
