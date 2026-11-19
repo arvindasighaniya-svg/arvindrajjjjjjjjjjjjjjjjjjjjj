@@ -364,11 +364,14 @@ def home():
 def login():
 
     if request.method == "GET":
-
-        if session.get("logged_in"):
-            return redirect(url_for("home"))
-
-        return render_template("login.html")
+        # Visiting /login must always show the login form. Clear any old
+        # authenticated cookie so a stale session cannot redirect to the dashboard.
+        session.clear()
+        response = app.make_response(render_template("login.html"))
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     supplied_password = request.form.get(
         "password",
