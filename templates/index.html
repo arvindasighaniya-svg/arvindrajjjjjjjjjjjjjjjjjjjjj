@@ -242,7 +242,7 @@
           `${Math.round(processed / recipients.length * 100)}%`;
         $("status").textContent =
           `Processed ${processed} of ${recipients.length}`;
-      } 
+      }
 
       $("status").textContent = stopped
         ? `Stopped. SMTP accepted: ${sent}; failed: ${failed}.`
