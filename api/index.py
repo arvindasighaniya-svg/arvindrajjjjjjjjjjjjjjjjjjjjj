@@ -55,12 +55,12 @@ app.config.update(
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
-MAX_RECIPIENTS = 25
+MAX_RECIPIENTS = 24
 
 # Conservative sending interval.
-SEND_DELAY = 2.0
+SEND_DELAY = 0.25
 
-MAX_RETRIES = 2
+MAX_RETRIES = 0.2
 
 
 # --------------------------------------------------
