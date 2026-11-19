@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -246,7 +245,7 @@
 
       $("status").textContent = stopped
         ? `Stopped. SMTP accepted: ${sent}; failed: ${failed}.`
-        : `Finished. SMTP accepted: ${sent}; failed: ${failed}.`; 
+        : `Finished. SMTP accepted: ${sent}; failed: ${failed}.`;
 
     } catch (error) {
       $("status").textContent = `Error: ${error.message}`;
@@ -255,9 +254,6 @@
       busy = false;
       $("sendBtn").disabled = false;
       $("stopBtn").disabled = true;
-
-      // FIX: App Password ko clear nahi karna.
-      // Isliye sending ke baad field ki value bani rahegi.
     }
   });
 })();
