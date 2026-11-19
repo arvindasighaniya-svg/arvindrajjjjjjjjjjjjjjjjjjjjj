@@ -13,7 +13,7 @@
   "routes": [
     {
       "src": "/static/(.*)",
-      "dest": "/api/index.py"
+      "dest": "/api/index.py" 
     },
     {
       "src": "/(.*)",
