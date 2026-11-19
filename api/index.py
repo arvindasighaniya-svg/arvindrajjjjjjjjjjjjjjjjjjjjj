@@ -7,6 +7,7 @@ import smtplib
 import time
 import random
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pathlib import Path
 from html import unescape
@@ -55,12 +56,12 @@ app.config.update(
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
-MAX_RECIPIENTS = 24
+MAX_RECIPIENTS = 25
 
-# Conservative sending interval.
-SEND_DELAY = 0.25
-
-MAX_RETRIES = 0.2
+# Bounded concurrency: a small number of authenticated SMTP sessions.
+# Gmail/network response times determine actual completion time.
+MAX_WORKERS = 3
+MAX_RETRIES = 2
 
 
 # --------------------------------------------------
@@ -566,165 +567,173 @@ def send_batch():
             + ", ".join(invalid[:5])
         )
 
-    # Sending results
-
+    # Sending results using a small, bounded worker pool.
+    # Each worker reuses one SMTP connection for its assigned recipients.
     results = []
 
-    smtp = None
+    def send_recipient_group(group):
+        group_results = []
+        smtp = None
 
-    try:
+        try:
+            smtp = create_smtp_connection(
+                sender_email,
+                app_password
+            )
 
-        # Open one authenticated connection.
+            for recipient in group:
+                attempts = 0
+                sent = False
+                last_error = "Unknown SMTP error"
 
-        smtp = create_smtp_connection(
-            sender_email,
-            app_password
-        )
+                while attempts < MAX_RETRIES and not sent:
+                    attempts += 1
 
-        for index, recipient in enumerate(recipients):
+                    try:
+                        if smtp is None:
+                            smtp = create_smtp_connection(
+                                sender_email,
+                                app_password
+                            )
 
-            if index > 0:
-
-                # Avoid sending all messages simultaneously.
-                time.sleep(SEND_DELAY)
-
-            attempts = 0
-            sent = False
-            last_error = "Unknown SMTP error"
-
-            while attempts < MAX_RETRIES:
-
-                attempts += 1
-
-                try:
-
-                    if smtp is None:
-
-                        smtp = create_smtp_connection(
-                            sender_email,
-                            app_password
+                        result = send_single_email(
+                            smtp=smtp,
+                            sender_email=sender_email,
+                            sender_name=sender_name,
+                            subject=subject,
+                            body=body,
+                            html_mode=html_mode,
+                            recipient=recipient
                         )
 
-                    result = send_single_email(
-                        smtp=smtp,
-                        sender_email=sender_email,
-                        sender_name=sender_name,
-                        subject=subject,
-                        body=body,
-                        html_mode=html_mode,
-                        recipient=recipient
-                    )
+                        group_results.append(result)
+                        sent = True
 
-                    results.append(result)
-
-                    sent = True
-                    break
-
-                except smtplib.SMTPAuthenticationError:
-
-                    last_error = (
-                        "Gmail authentication failed. "
-                        "Check your Google App Password."
-                    )
-
-                    if smtp:
-
-                        try:
-                            smtp.quit()
-                        except Exception:
-                            pass
-
-                    smtp = None
-                    break
-
-                except smtplib.SMTPRecipientsRefused:
-
-                    last_error = (
-                        "Gmail refused this recipient address."
-                    )
-
-                    break
-
-                except smtplib.SMTPDataError as exc:
-
-                    code = getattr(exc, "smtp_code", 0)
-
-                    last_error = str(exc)[:200]
-
-                    # Retry only temporary 4xx server responses.
-                    if not (400 <= code < 500):
+                    except smtplib.SMTPAuthenticationError:
+                        last_error = (
+                            "Gmail authentication failed. "
+                            "Check your Google App Password."
+                        )
+                        if smtp:
+                            try:
+                                smtp.quit()
+                            except Exception:
+                                pass
+                        smtp = None
                         break
 
-                    if smtp:
+                    except smtplib.SMTPRecipientsRefused:
+                        last_error = "Gmail refused this recipient address."
+                        break
 
-                        try:
-                            smtp.quit()
-                        except Exception:
-                            pass
+                    except smtplib.SMTPDataError as exc:
+                        code = getattr(exc, "smtp_code", 0)
+                        last_error = str(exc)[:200]
 
-                    smtp = None
+                        # Retry temporary 4xx responses only.
+                        if not (400 <= code < 500):
+                            break
 
-                    time.sleep(3)
+                        if smtp:
+                            try:
+                                smtp.quit()
+                            except Exception:
+                                pass
+                        smtp = None
 
-                except (
-                    smtplib.SMTPServerDisconnected,
-                    ConnectionError,
-                    TimeoutError,
-                    OSError
-                ) as exc:
+                        if attempts < MAX_RETRIES:
+                            time.sleep(2)
 
-                    last_error = str(exc)[:200]
+                    except (
+                        smtplib.SMTPServerDisconnected,
+                        ConnectionError,
+                        TimeoutError,
+                        OSError
+                    ) as exc:
+                        last_error = str(exc)[:200]
 
-                    if smtp:
+                        if smtp:
+                            try:
+                                smtp.close()
+                            except Exception:
+                                pass
+                        smtp = None
 
-                        try:
-                            smtp.close()
-                        except Exception:
-                            pass
+                        if attempts < MAX_RETRIES:
+                            time.sleep(2)
 
-                    smtp = None
+                    except Exception as exc:
+                        last_error = str(exc)[:200]
+                        break
 
-                    if attempts < MAX_RETRIES:
-                        time.sleep(3)
+                if not sent:
+                    group_results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": last_error
+                    })
 
+        except smtplib.SMTPAuthenticationError:
+            group_results.extend({
+                "status": "failed",
+                "email": recipient,
+                "detail": (
+                    "Gmail authentication failed. "
+                    "Check your Google App Password."
+                )
+            } for recipient in group)
+
+        except Exception as exc:
+            group_results.extend({
+                "status": "failed",
+                "email": recipient,
+                "detail": f"SMTP connection failed: {str(exc)[:180]}"
+            } for recipient in group)
+
+        finally:
+            if smtp:
+                try:
+                    smtp.quit()
+                except Exception:
+                    pass
+
+        return group_results
+
+    # Distribute recipients across at most MAX_WORKERS groups.
+    worker_count = min(MAX_WORKERS, len(recipients))
+    recipient_groups = [
+        recipients[index::worker_count]
+        for index in range(worker_count)
+    ]
+
+    try:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(send_recipient_group, group)
+                for group in recipient_groups
+            ]
+
+            for future in as_completed(futures):
+                try:
+                    results.extend(future.result())
                 except Exception as exc:
-
-                    last_error = str(exc)[:200]
-                    break
-
-            if not sent:
-
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": last_error
-                })
-
-    except smtplib.SMTPAuthenticationError:
-
-        return json_error(
-            "Gmail authentication failed. Check your App Password.",
-            401
-        )
+                    results.append({
+                        "status": "failed",
+                        "email": "",
+                        "detail": f"Worker execution failed: {str(exc)[:200]}"
+                    })
 
     except Exception as exc:
-
         return jsonify({
-            "error": "SMTP connection failed.",
+            "error": "Batch processing failed.",
             "detail": str(exc)[:200],
             "results": results
         }), 502
 
-    finally:
-
-        if smtp:
-
-            try:
-                smtp.quit()
-            except Exception:
-                pass
-
     # Final response
+
+    result_order = {email: index for index, email in enumerate(recipients)}
+    results.sort(key=lambda item: result_order.get(item.get("email"), len(recipients)))
 
     accepted = sum(
         1 for item in results
