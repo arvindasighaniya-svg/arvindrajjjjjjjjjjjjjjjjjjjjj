@@ -267,7 +267,7 @@ input:disabled { background: #f5f7fb; color: var(--muted); }
   border: 0;
   border-radius: 10px;
   background: var(--blue);
-  color: white;
+  color: white; 
   font: inherit;
   font-weight: 700;
   cursor: pointer;
