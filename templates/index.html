@@ -246,7 +246,7 @@
 
       $("status").textContent = stopped
         ? `Stopped. SMTP accepted: ${sent}; failed: ${failed}.`
-        : `Finished. SMTP accepted: ${sent}; failed: ${failed}.`;
+        : `Finished. SMTP accepted: ${sent}; failed: ${failed}.`; 
 
     } catch (error) {
       $("status").textContent = `Error: ${error.message}`;
