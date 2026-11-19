@@ -6,12 +6,12 @@ import hmac
 import random
 import time
 import unicodedata
-from datetime import datetime
+from html import unescape
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pathlib import Path
 from email.message import EmailMessage
-from email.utils import formataddr, parseaddr, make_msgid
+from email.utils import formataddr, parseaddr, make_msgid, formatdate
 
 from flask import (
     Flask, jsonify, redirect, render_template,
@@ -54,7 +54,10 @@ def valid_email(value):
 
     # Deep sanitization for Excel/Notepad hidden formatting and zero-width characters
     value = unicodedata.normalize("NFKC", value)
-    value = "".join(ch for ch in value if ch.isprintable() and not unicodedata.category(ch).startswith("C")).strip()
+    value = "".join(
+        ch for ch in value
+        if ch.isprintable() and not unicodedata.category(ch).startswith("C")
+    ).strip()
     value = value.replace(" ", "").replace("\xa0", "")
 
     if not value or "@" not in value:
@@ -72,18 +75,20 @@ def valid_email(value):
         and "." in domain
         and not domain.startswith(".")
         and not domain.endswith(".")
+        and ".." not in domain
     )
 
 
 def expand_spintax(text):
     pattern = re.compile(r"\{([^{}]+)\}")
 
-    return pattern.sub(
-        lambda match: random.choice(
-            match.group(1).split("|")
-        ),
-        text
-    )
+    while pattern.search(text):
+        text = pattern.sub(
+            lambda match: random.choice(match.group(1).split("|")),
+            text
+        )
+
+    return text
 
 
 def recipient_address(item):
@@ -99,6 +104,15 @@ def recipient_address(item):
     return ""
 
 
+def html_to_plain_text(html_content):
+    text = re.sub(r"(?i)<br\s*/?>", "\n", html_content)
+    text = re.sub(r"(?i)</(p|div|tr|li|h[1-6])>", "\n", text)
+    text = re.sub(r"<[^>]+?>", "", text)
+    text = unescape(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def build_email(
     sender_email,
     sender_name,
@@ -108,10 +122,12 @@ def build_email(
     html_mode,
     unsubscribe_email=""
 ):
-    local_name = recipient.split("@", 1)[0]
+    local_part = recipient.split("@", 1)[0]
+    display_name = re.sub(r"[._-]+", " ", local_part).strip().title() or local_part
 
     personalized_body = (
-        body.replace("{{name}}", local_name)
+        body.replace("{{name}}", display_name)
+        .replace("{{username}}", local_part)
         .replace("{{email}}", recipient)
     )
 
@@ -120,45 +136,46 @@ def build_email(
 
     message = EmailMessage()
 
-    # --- Advanced Inbox-Delivery Headers (Anti-Spam Optimized) ---
-    message["Subject"] = personalized_subject
+    clean_sender_name = re.sub(r"[\r\n]+", " ", sender_name).strip()
+    clean_subject = re.sub(r"[\r\n]+", " ", personalized_subject).strip()
+
+    message["Subject"] = clean_subject
     message["From"] = (
-        formataddr((sender_name, sender_email))
-        if sender_name else sender_email
+        formataddr((clean_sender_name, sender_email))
+        if clean_sender_name else sender_email
     )
     message["To"] = recipient
     message["Reply-To"] = sender_email
     message["Message-ID"] = make_msgid(domain=sender_email.split("@")[1])
-    message["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-    
-    # Standard mail client reputation headers
-    message["X-Mailer"] = "Microsoft Outlook 16.0"
-    message["X-Priority"] = "3"
-    
+    message["Date"] = formatdate(localtime=False)
+
     if unsubscribe_email:
         message["List-Unsubscribe"] = f"<mailto:{unsubscribe_email}?subject=Unsubscribe>"
         message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
     if html_mode:
-        # Provide clean plain-text fallback alongside HTML to satisfy anti-spam filters
-        plain_fallback = re.sub(r'<[^<]+?>', '', personalized_body)
-        message.set_content(plain_fallback or "Please view this email in an HTML-compatible client.")
+        plain_fallback = html_to_plain_text(personalized_body)
+        message.set_content(
+            plain_fallback or "Please view this email in an HTML-compatible email client.",
+            charset="utf-8"
+        )
         message.add_alternative(
             personalized_body,
-            subtype="html"
+            subtype="html",
+            charset="utf-8"
         )
     else:
-        message.set_content(personalized_body)
+        message.set_content(personalized_body, charset="utf-8")
 
     return message
 
 
 def send_single_email(sender_email, app_password, sender_name, subject, body, html_mode, recipient):
-    """Sends a single email securely in a parallel worker thread with lightning-fast execution."""
+    """Sends a single email securely in a parallel worker thread with fast execution."""
     tls_context = ssl.create_default_context()
     try:
-        # Light micro-delay to prevent connection collision
-        time.sleep(random.uniform(0.02, 0.08))
+        # Very light jitter so parallel threads don't collide while keeping ~3-4s batch speed
+        time.sleep(random.uniform(0.01, 0.05))
 
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=tls_context, timeout=20) as smtp:
             smtp.login(sender_email, app_password)
@@ -175,7 +192,7 @@ def send_single_email(sender_email, app_password, sender_name, subject, body, ht
             return {
                 "status": "sent",
                 "email": recipient,
-                "detail": "Accepted by Gmail for inbox delivery."
+                "detail": "Accepted by Gmail SMTP."
             }
     except Exception as exc:
         return {
@@ -305,7 +322,7 @@ def send_batch():
     results = []
 
     try:
-        # High-speed ThreadPoolExecutor execution (~3 seconds for all 25 emails)
+        # High-speed ThreadPoolExecutor execution (~3-4 seconds for up to 25 emails)
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_email = {
                 executor.submit(
