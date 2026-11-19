@@ -30,17 +30,35 @@ app = Flask(
     static_url_path="/static"
 )
 
-SECRET_KEY = os.environ.get("SESSION_SECRET")
-if not SECRET_KEY and os.environ.get("VERCEL") == "1":
-    raise RuntimeError("SESSION_SECRET must be configured in Vercel.")
+# Flask's signed-cookie sessions must use the SAME secret on every Vercel
+# serverless instance. Set SESSION_SECRET in Vercel for the strongest setup.
+# LOGIN_PASSWORD is a stable fallback so missing SESSION_SECRET does not
+# silently switch to a per-instance or temporary signing key.
+import hashlib
+from datetime import timedelta
 
-app.secret_key = SECRET_KEY or "local-development-only-change-this"
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip()
+LOGIN_PASSWORD_SECRET = os.environ.get("LOGIN_PASSWORD", "")
+
+if SESSION_SECRET:
+    app.secret_key = SESSION_SECRET
+elif LOGIN_PASSWORD_SECRET:
+    app.secret_key = hashlib.sha256(
+        ("secure-mail-console-session:" + LOGIN_PASSWORD_SECRET).encode("utf-8")
+    ).hexdigest()
+else:
+    # Local-only fallback. Production login still requires LOGIN_PASSWORD.
+    app.secret_key = "local-development-only-change-this"
 
 app.config.update(
+    SESSION_COOKIE_NAME="secure_mail_session",
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=os.environ.get("VERCEL", "").lower() == "1",
+    SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    PERMANENT_SESSION_LIFETIME=3600,
+    SESSION_COOKIE_PATH="/",
+    SESSION_COOKIE_DOMAIN=None,
+    SESSION_REFRESH_EACH_REQUEST=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     MAX_CONTENT_LENGTH=1024 * 1024
 )
 
@@ -237,6 +255,14 @@ def send_single_email(smtp, sender_email, sender_name, subject, body, html_mode,
     }
 
 
+@app.after_request
+def prevent_private_response_caching(response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
 # --------------------------------------------------
 # LOGIN PAGE
 # --------------------------------------------------
@@ -273,7 +299,19 @@ def login():
     session.clear()
     session["logged_in"] = True
     session.permanent = True
+    session.modified = True
     return redirect(url_for("home"))
+
+
+# --------------------------------------------------
+# SESSION HEALTH CHECK
+# --------------------------------------------------
+
+@app.get("/session-check")
+def session_check():
+    if session.get("logged_in") is True:
+        return jsonify({"authenticated": True}), 200
+    return jsonify({"authenticated": False}), 401
 
 
 # --------------------------------------------------
