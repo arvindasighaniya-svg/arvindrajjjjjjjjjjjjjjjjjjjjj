@@ -343,7 +343,7 @@ def send_single_email(
     return {
         "status": "accepted",
         "email": recipient,
-        "detail": "Accepted by Gmail SMTP. Inbox delivery is not guaranteed."
+        "detail": "Accepted by Gmail SMTP for processing; mailbox placement is not verified."
     }
 
 
