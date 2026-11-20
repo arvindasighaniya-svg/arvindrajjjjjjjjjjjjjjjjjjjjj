@@ -1,4 +1,3 @@
-
 import os
 import re
 import hmac
@@ -57,9 +56,6 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
 MAX_RECIPIENTS = 25
-
-# Bounded concurrency: a small number of authenticated SMTP sessions.
-# Gmail/network response times determine actual completion time.
 MAX_WORKERS = 3
 MAX_RETRIES = 2
 
@@ -77,7 +73,6 @@ def json_error(message, status=400):
 # --------------------------------------------------
 
 def clean_email(value):
-
     if not isinstance(value, str):
         return ""
 
@@ -96,7 +91,6 @@ def clean_email(value):
 
 
 def valid_email(value):
-
     value = clean_email(value)
 
     if not value or len(value) > 254:
@@ -128,7 +122,6 @@ def valid_email(value):
 
 
 def recipient_address(item):
-
     if isinstance(item, str):
         return clean_email(
             item.replace('"', "").replace("'", "")
@@ -149,11 +142,9 @@ def recipient_address(item):
 # --------------------------------------------------
 
 def expand_spintax(text):
-
     pattern = re.compile(r"\{([^{}]+)\}")
 
     while pattern.search(text):
-
         text = pattern.sub(
             lambda match: random.choice(
                 match.group(1).split("|")
@@ -169,7 +160,6 @@ def expand_spintax(text):
 # --------------------------------------------------
 
 def html_to_plain_text(html_content):
-
     text = re.sub(
         r"(?i)<br\s*/?>",
         "\n",
@@ -211,7 +201,6 @@ def build_email(
     body,
     html_mode=False
 ):
-
     local_part = recipient.split("@", 1)[0]
 
     display_name = re.sub(
@@ -226,13 +215,8 @@ def build_email(
         .replace("{{email}}", recipient)
     )
 
-    personalized_body = expand_spintax(
-        personalized_body
-    )
-
-    personalized_subject = expand_spintax(
-        subject
-    )
+    personalized_body = expand_spintax(personalized_body)
+    personalized_subject = expand_spintax(subject)
 
     message = EmailMessage()
 
@@ -258,18 +242,13 @@ def build_email(
 
     message["To"] = recipient
     message["Reply-To"] = sender_email
-
     message["Date"] = formatdate(localtime=True)
-
     message["Message-ID"] = make_msgid(
         domain=sender_email.split("@", 1)[1]
     )
 
     if html_mode:
-
-        plain_text = html_to_plain_text(
-            personalized_body
-        )
+        plain_text = html_to_plain_text(personalized_body)
 
         message.set_content(
             plain_text or "Please view this email in an HTML-compatible email client.",
@@ -281,9 +260,7 @@ def build_email(
             subtype="html",
             charset="utf-8"
         )
-
     else:
-
         message.set_content(
             personalized_body,
             charset="utf-8"
@@ -297,7 +274,6 @@ def build_email(
 # --------------------------------------------------
 
 def create_smtp_connection(sender_email, app_password):
-
     context = ssl.create_default_context()
 
     smtp = smtplib.SMTP_SSL(
@@ -307,11 +283,7 @@ def create_smtp_connection(sender_email, app_password):
         timeout=30
     )
 
-    smtp.login(
-        sender_email,
-        app_password
-    )
-
+    smtp.login(sender_email, app_password)
     return smtp
 
 
@@ -328,7 +300,6 @@ def send_single_email(
     html_mode,
     recipient
 ):
-
     message = build_email(
         sender_email=sender_email,
         sender_name=sender_name,
@@ -341,9 +312,9 @@ def send_single_email(
     smtp.send_message(message)
 
     return {
-        "status": "accepted",
+        "status": "sent",
         "email": recipient,
-        "detail": "Accepted by Gmail SMTP for processing; mailbox placement is not verified."
+        "detail": "Accepted by Gmail"
     }
 
 
@@ -353,7 +324,6 @@ def send_single_email(
 
 @app.get("/")
 def home():
-
     if not session.get("logged_in"):
         return redirect(url_for("login"))
 
@@ -362,36 +332,22 @@ def home():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-
     if request.method == "GET":
-
         if session.get("logged_in"):
             return redirect(url_for("home"))
 
         return render_template("login.html")
 
-    supplied_password = request.form.get(
-        "password",
-        ""
-    )
-
-    configured_password = os.environ.get(
-        "LOGIN_PASSWORD",
-        ""
-    )
+    supplied_password = request.form.get("password", "")
+    configured_password = os.environ.get("LOGIN_PASSWORD", "")
 
     if not configured_password:
-
         return render_template(
             "login.html",
             error="LOGIN_PASSWORD is not configured."
         ), 500
 
-    if not hmac.compare_digest(
-        supplied_password,
-        configured_password
-    ):
-
+    if not hmac.compare_digest(supplied_password, configured_password):
         return render_template(
             "login.html",
             error="Incorrect workspace password."
@@ -410,9 +366,7 @@ def login():
 
 @app.route("/logout", methods=["GET", "POST"])
 def logout():
-
     session.clear()
-
     return redirect(url_for("login"))
 
 
@@ -422,9 +376,7 @@ def logout():
 
 @app.post("/send-batch")
 def send_batch():
-
     if not session.get("logged_in"):
-
         return json_error(
             "Your session has expired. Please sign in again.",
             401
@@ -433,7 +385,6 @@ def send_batch():
     data = request.get_json(silent=True)
 
     if not isinstance(data, dict):
-
         return json_error(
             "A valid JSON request body is required."
         )
@@ -458,13 +409,8 @@ def send_batch():
         or ""
     ).strip()[:100]
 
-    subject = str(
-        data.get("subject") or ""
-    ).strip()
-
-    body = str(
-        data.get("body") or ""
-    )
+    subject = str(data.get("subject") or "").strip()
+    body = str(data.get("body") or "")
 
     html_mode = (
         data.get("htmlMode", data.get("is_html", False))
@@ -472,64 +418,49 @@ def send_batch():
     )
 
     consent = (
-        data.get("consentConfirmed",
-                 data.get("consent_confirmed", False))
+        data.get("consentConfirmed", data.get("consent_confirmed", False))
         is True
     )
 
-    raw_recipients = data.get(
-        "recipients",
-        []
-    )
-
-    # Sender validation
+    raw_recipients = data.get("recipients", [])
 
     if (
         not sender_email.endswith("@gmail.com")
         or not valid_email(sender_email)
     ):
-
         return json_error(
             "Please enter a valid Gmail sender address."
         )
 
     if not app_password:
-
         return json_error(
             "Google App Password is required."
         )
 
     if not subject or len(subject) > 998:
-
         return json_error(
             "Please enter a valid email subject."
         )
 
     if not body.strip():
-
         return json_error(
             "Email message body is required."
         )
 
     if not consent:
-
         return json_error(
             "Please confirm that all recipients have consented to receive your email."
         )
 
     if not isinstance(raw_recipients, list):
-
         return json_error(
             "Recipients must be provided as a list."
         )
-
-    # Recipient validation
 
     recipients = []
     seen = set()
 
     for item in raw_recipients:
-
         address = recipient_address(item)
 
         if not address:
@@ -538,18 +469,15 @@ def send_batch():
         key = address.lower()
 
         if key not in seen:
-
             seen.add(key)
             recipients.append(address)
 
     if not recipients:
-
         return json_error(
             "Please provide at least one valid recipient."
         )
 
     if len(recipients) > MAX_RECIPIENTS:
-
         return json_error(
             f"Maximum {MAX_RECIPIENTS} recipients allowed per batch."
         )
@@ -561,14 +489,11 @@ def send_batch():
     ]
 
     if invalid:
-
         return json_error(
             "Invalid email addresses: "
             + ", ".join(invalid[:5])
         )
 
-    # Sending results using a small, bounded worker pool.
-    # Each worker reuses one SMTP connection for its assigned recipients.
     results = []
 
     def send_recipient_group(group):
@@ -630,7 +555,6 @@ def send_batch():
                         code = getattr(exc, "smtp_code", 0)
                         last_error = str(exc)[:200]
 
-                        # Retry temporary 4xx responses only.
                         if not (400 <= code < 500):
                             break
 
@@ -699,7 +623,6 @@ def send_batch():
 
         return group_results
 
-    # Distribute recipients across at most MAX_WORKERS groups.
     worker_count = min(MAX_WORKERS, len(recipients))
     recipient_groups = [
         recipients[index::worker_count]
@@ -730,26 +653,24 @@ def send_batch():
             "results": results
         }), 502
 
-    # Final response
-
     result_order = {email: index for index, email in enumerate(recipients)}
     results.sort(key=lambda item: result_order.get(item.get("email"), len(recipients)))
 
-    accepted = sum(
+    sent_count = sum(
         1 for item in results
-        if item["status"] == "accepted"
+        if item["status"] == "sent"
     )
 
-    failed = sum(
+    failed_count = sum(
         1 for item in results
         if item["status"] == "failed"
     )
 
     return jsonify({
-        "success": failed == 0,
+        "success": failed_count == 0,
         "total": len(recipients),
-        "accepted": accepted,
-        "failed": failed,
+        "accepted": sent_count,
+        "failed": failed_count,
         "results": results
     }), 200
 
@@ -760,7 +681,6 @@ def send_batch():
 
 @app.errorhandler(413)
 def request_too_large(error):
-
     return json_error(
         "Request is too large.",
         413
@@ -769,7 +689,6 @@ def request_too_large(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-
     return json_error(
         "An internal server error occurred.",
         500
