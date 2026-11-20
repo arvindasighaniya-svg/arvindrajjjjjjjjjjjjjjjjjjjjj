@@ -4,20 +4,17 @@ import hmac
 import ssl
 import smtplib
 import time
+import random
 import unicodedata
-
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from html import unescape
 from email.message import EmailMessage
-from email.utils import formataddr, parseaddr, formatdate
-from flask import (
-    Flask,
-    jsonify,
-    redirect,
-    render_template,
-    request,
-    session,
-    url_for,
-)
+from email.utils import formataddr, parseaddr, make_msgid, formatdate
+
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+
 
 # --------------------------------------------------
 # APP CONFIGURATION
@@ -46,17 +43,21 @@ app.config.update(
     MAX_CONTENT_LENGTH=1024 * 1024,
 )
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
 # --------------------------------------------------
-# GMAIL SMTP SETTINGS
+# EMAIL SETTINGS
 # --------------------------------------------------
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
-# Keep batches modest. Gmail quotas and policies still apply.
 MAX_RECIPIENTS = 25
-SEND_INTERVAL_SECONDS = 2.0
-SMTP_TIMEOUT_SECONDS = 30
+MAX_WORKERS = 3
+SMTP_TIMEOUT = 30
+MAX_CONNECT_RETRIES = 2
 
 
 # --------------------------------------------------
@@ -68,18 +69,19 @@ def json_error(message, status=400):
 
 
 # --------------------------------------------------
-# INPUT VALIDATION
+# EMAIL VALIDATION
 # --------------------------------------------------
 
 def clean_email(value):
     if not isinstance(value, str):
         return ""
 
-    value = unicodedata.normalize("NFKC", value).strip()
-    if any(ch.isspace() for ch in value):
-        return ""
-
-    return value
+    value = unicodedata.normalize("NFKC", value)
+    value = "".join(
+        ch for ch in value
+        if ch.isprintable() and not unicodedata.category(ch).startswith("C")
+    )
+    return value.replace("\xa0", "").replace(" ", "").strip()
 
 
 def valid_email(value):
@@ -89,18 +91,20 @@ def valid_email(value):
         return False
 
     _, address = parseaddr(value)
-    if address != value or address.count("@") != 1:
+    if address != value or "@" not in address:
         return False
 
     local, domain = address.rsplit("@", 1)
 
-    if not local or len(local) > 64 or not domain:
-        return False
-
-    if "." not in domain or domain.startswith(".") or domain.endswith("."):
-        return False
-
-    if ".." in address:
+    if (
+        not local
+        or not domain
+        or len(local) > 64
+        or "." not in domain
+        or domain.startswith(".")
+        or domain.endswith(".")
+        or ".." in address
+    ):
         return False
 
     return True
@@ -108,51 +112,97 @@ def valid_email(value):
 
 def recipient_address(item):
     if isinstance(item, str):
-        return clean_email(item.strip().strip("\"'"))
+        return clean_email(item.replace('"', "").replace("'", ""))
 
     if isinstance(item, dict):
-        return clean_email(str(item.get("email", "")).strip().strip("\"'"))
+        return clean_email(
+            str(item.get("email", "")).replace('"', "").replace("'", "")
+        )
 
     return ""
 
 
-def safe_header(value, max_length=998):
-    """Remove CR/LF to prevent email-header injection."""
-    value = str(value or "")
-    value = re.sub(r"[\r\n]+", " ", value)
-    return value.strip()[:max_length]
+# --------------------------------------------------
+# SPINTAX
+# --------------------------------------------------
+
+def expand_spintax(value):
+    pattern = re.compile(r"\{([^{}]+)\}")
+
+    while pattern.search(value):
+        value = pattern.sub(
+            lambda match: random.choice(match.group(1).split("|")),
+            value,
+        )
+
+    return value
+
+
+# --------------------------------------------------
+# HTML TO TEXT
+# --------------------------------------------------
+
+def html_to_plain_text(html_content):
+    text = re.sub(r"(?i)<br\s*/?>", "\n", html_content)
+    text = re.sub(r"(?i)</(p|div|tr|li|h[1-6])>", "\n", text)
+    text = re.sub(r"<[^>]+?>", "", text)
+    text = unescape(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 # --------------------------------------------------
 # EMAIL BUILDER
 # --------------------------------------------------
 
-def build_email(sender_email, sender_name, recipient, subject, body, html_mode=False):
+def build_email(
+    sender_email,
+    sender_name,
+    recipient,
+    subject,
+    body,
+    html_mode=False,
+):
+    local_part = recipient.split("@", 1)[0]
+    display_name = re.sub(r"[._-]+", " ", local_part).strip().title() or local_part
+
+    personalized_body = (
+        body.replace("{{name}}", display_name)
+        .replace("{{username}}", local_part)
+        .replace("{{email}}", recipient)
+    )
+
+    personalized_body = expand_spintax(personalized_body)
+    personalized_subject = expand_spintax(subject)
+
     message = EmailMessage()
 
-    clean_sender_name = safe_header(sender_name, 100)
-    clean_subject = safe_header(subject, 250)
+    clean_sender_name = re.sub(r"[\r\n]+", " ", sender_name).strip()[:100]
+    clean_subject = re.sub(r"[\r\n]+", " ", personalized_subject).strip()
 
     message["Subject"] = clean_subject
     message["From"] = (
         formataddr((clean_sender_name, sender_email))
-        if clean_sender_name
-        else sender_email
+        if clean_sender_name else sender_email
     )
     message["To"] = recipient
     message["Reply-To"] = sender_email
     message["Date"] = formatdate(localtime=True)
+    message["Message-ID"] = make_msgid(domain=sender_email.split("@", 1)[1])
 
-    # Keep the message personal and transparent. Do not rotate/spin wording
-    # to try to influence spam filters.
     if html_mode:
+        plain_text = html_to_plain_text(personalized_body)
         message.set_content(
-            "This email contains an HTML version. "
-            "If you cannot view it, please reply to the sender."
+            plain_text or "Please view this email in an HTML-compatible email client.",
+            charset="utf-8",
         )
-        message.add_alternative(str(body), subtype="html", charset="utf-8")
+        message.add_alternative(
+            personalized_body,
+            subtype="html",
+            charset="utf-8",
+        )
     else:
-        message.set_content(str(body), charset="utf-8")
+        message.set_content(personalized_body, charset="utf-8")
 
     return message
 
@@ -167,18 +217,65 @@ def create_smtp_connection(sender_email, app_password):
         SMTP_HOST,
         SMTP_PORT,
         context=context,
-        timeout=SMTP_TIMEOUT_SECONDS,
+        timeout=SMTP_TIMEOUT,
     )
     try:
         smtp.login(sender_email, app_password)
+        return smtp
     except Exception:
-        smtp.close()
+        try:
+            smtp.quit()
+        except Exception:
+            pass
         raise
-    return smtp
+
+
+def close_smtp(smtp):
+    if smtp is not None:
+        try:
+            smtp.quit()
+        except Exception:
+            try:
+                smtp.close()
+            except Exception:
+                pass
 
 
 # --------------------------------------------------
-# LOGIN
+# SINGLE EMAIL SENDER
+# --------------------------------------------------
+
+def send_single_email(
+    smtp,
+    sender_email,
+    sender_name,
+    subject,
+    body,
+    html_mode,
+    recipient,
+):
+    message = build_email(
+        sender_email=sender_email,
+        sender_name=sender_name,
+        recipient=recipient,
+        subject=subject,
+        body=body,
+        html_mode=html_mode,
+    )
+
+    # A successful return means Gmail's SMTP server accepted the message.
+    # It does NOT prove Inbox placement or final delivery.
+    smtp.send_message(message)
+
+    return {
+        "status": "sent",
+        "email": recipient,
+        "detail": "Accepted by Gmail",
+    }
+
+
+# --------------------------------------------------
+# LOGIN PAGE
 # --------------------------------------------------
 
 @app.get("/")
@@ -201,7 +298,7 @@ def login():
     if not configured_password:
         return render_template(
             "login.html",
-            error="LOGIN_PASSWORD is not configured in Vercel.",
+            error="LOGIN_PASSWORD is not configured.",
         ), 500
 
     if not hmac.compare_digest(supplied_password, configured_password):
@@ -216,6 +313,10 @@ def login():
     return redirect(url_for("home"))
 
 
+# --------------------------------------------------
+# LOGOUT
+# --------------------------------------------------
+
 @app.route("/logout", methods=["GET", "POST"])
 def logout():
     session.clear()
@@ -229,10 +330,7 @@ def logout():
 @app.post("/send-batch")
 def send_batch():
     if not session.get("logged_in"):
-        return json_error(
-            "Your session has expired. Please sign in again.",
-            401,
-        )
+        return json_error("Your session has expired. Please sign in again.", 401)
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -244,39 +342,34 @@ def send_batch():
     app_password = str(
         data.get("appPassword") or data.get("app_password") or ""
     ).strip().replace(" ", "")
-    sender_name = safe_header(
-        data.get("senderName") or data.get("sender_name") or "",
-        100,
-    )
+    sender_name = str(
+        data.get("senderName") or data.get("sender_name") or ""
+    ).strip()[:100]
     subject = str(data.get("subject") or "").strip()
     body = str(data.get("body") or "")
-    html_mode = (
-        data.get("htmlMode", data.get("is_html", False)) is True
-    )
+
+    html_mode = data.get("htmlMode", data.get("is_html", False)) is True
     consent = (
         data.get("consentConfirmed", data.get("consent_confirmed", False))
         is True
     )
     raw_recipients = data.get("recipients", [])
 
-    if not valid_email(sender_email) or not sender_email.endswith("@gmail.com"):
-        return json_error("Please enter a valid @gmail.com sender address.")
+    if not sender_email.endswith("@gmail.com") or not valid_email(sender_email):
+        return json_error("Please enter a valid Gmail sender address.")
 
     if not app_password:
         return json_error("Google App Password is required.")
 
-    if not subject or len(subject) > 250:
-        return json_error("Please enter a subject between 1 and 250 characters.")
+    if not subject or len(subject) > 998:
+        return json_error("Please enter a valid email subject.")
 
     if not body.strip():
         return json_error("Email message body is required.")
 
-    if len(body) > 100000:
-        return json_error("Email message body is too long.")
-
     if not consent:
         return json_error(
-            "Confirm that every recipient has agreed to receive this email."
+            "Please confirm that all recipients have consented to receive your email."
         )
 
     if not isinstance(raw_recipients, list):
@@ -295,137 +388,198 @@ def send_batch():
             recipients.append(address)
 
     if not recipients:
-        return json_error("Please provide at least one recipient email address.")
+        return json_error("Please provide at least one valid recipient.")
 
     if len(recipients) > MAX_RECIPIENTS:
         return json_error(
-            f"A maximum of {MAX_RECIPIENTS} recipients is allowed per batch."
+            f"Maximum {MAX_RECIPIENTS} recipients allowed per batch."
         )
 
     invalid = [address for address in recipients if not valid_email(address)]
     if invalid:
-        return json_error(
-            "Invalid recipient email address: " + ", ".join(invalid[:5])
-        )
+        return json_error("Invalid email addresses: " + ", ".join(invalid[:5]))
+
+    # One SMTP connection per worker. A worker never shares its connection
+    # with another thread.
+    def send_recipient_group(group):
+        group_results = []
+        smtp = None
+
+        try:
+            for recipient in group:
+                # Retry connection/login failures before attempting delivery.
+                if smtp is None:
+                    connect_error = None
+                    for attempt in range(MAX_CONNECT_RETRIES):
+                        try:
+                            smtp = create_smtp_connection(sender_email, app_password)
+                            connect_error = None
+                            break
+                        except smtplib.SMTPAuthenticationError:
+                            raise
+                        except (smtplib.SMTPException, OSError, TimeoutError) as exc:
+                            connect_error = str(exc)[:200]
+                            if attempt + 1 < MAX_CONNECT_RETRIES:
+                                time.sleep(1.5 * (attempt + 1))
+
+                    if smtp is None:
+                        group_results.append({
+                            "status": "failed",
+                            "email": recipient,
+                            "detail": f"SMTP connection failed: {connect_error or 'Unknown error'}",
+                        })
+                        continue
+
+                try:
+                    result = send_single_email(
+                        smtp=smtp,
+                        sender_email=sender_email,
+                        sender_name=sender_name,
+                        subject=subject,
+                        body=body,
+                        html_mode=html_mode,
+                        recipient=recipient,
+                    )
+                    group_results.append(result)
+
+                except smtplib.SMTPAuthenticationError:
+                    close_smtp(smtp)
+                    smtp = None
+                    group_results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": "Gmail authentication failed. Check your Google App Password.",
+                    })
+                    # Authentication failure will not improve by retrying.
+                    for remaining in group[group.index(recipient) + 1:]:
+                        group_results.append({
+                            "status": "failed",
+                            "email": remaining,
+                            "detail": "Not attempted because Gmail authentication failed.",
+                        })
+                    break
+
+                except smtplib.SMTPRecipientsRefused:
+                    group_results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": "Gmail refused this recipient address.",
+                    })
+
+                except smtplib.SMTPDataError as exc:
+                    code = getattr(exc, "smtp_code", 0)
+                    group_results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": f"Gmail rejected the message (SMTP {code}): {str(exc)[:160]}",
+                    })
+                    if code >= 500:
+                        close_smtp(smtp)
+                        smtp = None
+
+                except (smtplib.SMTPServerDisconnected, ConnectionError,
+                        TimeoutError, OSError) as exc:
+                    # The connection may have dropped after Gmail accepted DATA.
+                    # Do not automatically resend: that could create duplicates.
+                    close_smtp(smtp)
+                    smtp = None
+                    group_results.append({
+                        "status": "delivery_unknown",
+                        "email": recipient,
+                        "detail": (
+                            "Connection ended during sending. Check the recipient "
+                            "before retrying to avoid a duplicate."
+                        ),
+                    })
+
+                except smtplib.SMTPException as exc:
+                    group_results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": f"SMTP error: {str(exc)[:180]}",
+                    })
+                    close_smtp(smtp)
+                    smtp = None
+
+                except Exception as exc:
+                    logger.exception("Unexpected error while sending to %s", recipient)
+                    group_results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": f"Unexpected sending error: {str(exc)[:160]}",
+                    })
+
+        except smtplib.SMTPAuthenticationError:
+            group_results.extend({
+                "status": "failed",
+                "email": recipient,
+                "detail": "Gmail authentication failed. Check your Google App Password.",
+            } for recipient in group if not any(
+                item.get("email") == recipient for item in group_results
+            ))
+
+        except Exception as exc:
+            logger.exception("SMTP worker failed")
+            already_reported = {item.get("email") for item in group_results}
+            group_results.extend({
+                "status": "failed",
+                "email": recipient,
+                "detail": f"SMTP worker failed: {str(exc)[:160]}",
+            } for recipient in group if recipient not in already_reported)
+
+        finally:
+            close_smtp(smtp)
+
+        return group_results
+
+    worker_count = min(MAX_WORKERS, len(recipients))
+    recipient_groups = [
+        recipients[index::worker_count]
+        for index in range(worker_count)
+    ]
 
     results = []
-    smtp = None
-
     try:
-        # One authenticated connection, one recipient at a time.
-        # No parallel workers and no automatic retries (which can duplicate mail).
-        smtp = create_smtp_connection(sender_email, app_password)
-
-        for index, recipient in enumerate(recipients):
-            try:
-                message = build_email(
-                    sender_email=sender_email,
-                    sender_name=sender_name,
-                    recipient=recipient,
-                    subject=subject,
-                    body=body,
-                    html_mode=html_mode,
-                )
-                smtp.send_message(message)
-                results.append({
-                    "status": "accepted",
-                    "email": recipient,
-                    "detail": (
-                        "Accepted by Gmail for sending. "
-                        "Inbox placement is not confirmed."
-                    ),
-                })
-
-            except smtplib.SMTPAuthenticationError:
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": "Gmail authentication failed. Check the Gmail address and App Password.",
-                })
-                # Authentication errors affect the connection; stop the batch.
-                for remaining in recipients[index + 1:]:
-                    results.append({
-                        "status": "not_attempted",
-                        "email": remaining,
-                        "detail": "Not attempted because Gmail authentication failed.",
-                    })
-                break
-
-            except smtplib.SMTPRecipientsRefused:
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": "Gmail refused this recipient address.",
-                })
-
-            except smtplib.SMTPDataError as exc:
-                code = getattr(exc, "smtp_code", None)
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": f"Gmail rejected the message (SMTP {code}). {str(exc)[:180]}",
-                })
-
-            except (smtplib.SMTPServerDisconnected, TimeoutError, OSError) as exc:
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": f"SMTP connection error: {str(exc)[:180]}",
-                })
-                for remaining in recipients[index + 1:]:
-                    results.append({
-                        "status": "not_attempted",
-                        "email": remaining,
-                        "detail": "Not attempted because the SMTP connection failed.",
-                    })
-                break
-
-            except Exception as exc:
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": f"Sending failed: {str(exc)[:180]}",
-                })
-
-            if index < len(recipients) - 1:
-                time.sleep(SEND_INTERVAL_SECONDS)
-
-    except smtplib.SMTPAuthenticationError:
-        results = [{
-            "status": "failed",
-            "email": recipient,
-            "detail": "Gmail authentication failed. Check the Gmail address and Google App Password.",
-        } for recipient in recipients]
-
-    except Exception as exc:
-        results = [{
-            "status": "failed",
-            "email": recipient,
-            "detail": f"Could not connect to Gmail SMTP: {str(exc)[:180]}",
-        } for recipient in recipients]
-
-    finally:
-        if smtp is not None:
-            try:
-                smtp.quit()
-            except Exception:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(send_recipient_group, group)
+                for group in recipient_groups
+            ]
+            for future in as_completed(futures):
                 try:
-                    smtp.close()
-                except Exception:
-                    pass
+                    results.extend(future.result())
+                except Exception as exc:
+                    logger.exception("Worker execution failed")
+                    results.append({
+                        "status": "failed",
+                        "email": "",
+                        "detail": f"Worker execution failed: {str(exc)[:180]}",
+                    })
+    except Exception as exc:
+        logger.exception("Batch processing failed")
+        return jsonify({
+            "error": "Batch processing failed.",
+            "detail": str(exc)[:180],
+            "results": results,
+        }), 502
 
-    accepted_count = sum(1 for item in results if item["status"] == "accepted")
+    result_order = {email: index for index, email in enumerate(recipients)}
+    results.sort(
+        key=lambda item: result_order.get(item.get("email"), len(recipients))
+    )
+
+    sent_count = sum(1 for item in results if item["status"] == "sent")
     failed_count = sum(1 for item in results if item["status"] == "failed")
-    not_attempted_count = sum(
-        1 for item in results if item["status"] == "not_attempted"
+    unknown_count = sum(
+        1 for item in results if item["status"] == "delivery_unknown"
     )
 
     return jsonify({
-        "success": failed_count == 0 and not_attempted_count == 0,
+        "success": failed_count == 0 and unknown_count == 0,
         "total": len(recipients),
-        "accepted_by_gmail": accepted_count,
+        "accepted": sent_count,
         "failed": failed_count,
-        "not_attempted": not_attempted_count,
+        "delivery_unknown": unknown_count,
         "results": results,
     }), 200
 
@@ -441,8 +595,12 @@ def request_too_large(error):
 
 @app.errorhandler(500)
 def internal_error(error):
+    logger.exception("Unhandled application error")
     return json_error("An internal server error occurred.", 500)
 
 
-# Vercel Python runtime entry point
+# --------------------------------------------------
+# VERCEL ENTRY POINT
+# --------------------------------------------------
+
 application = app
