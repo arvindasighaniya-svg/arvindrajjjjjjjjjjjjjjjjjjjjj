@@ -35,8 +35,8 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SECURE=os.environ.get("VERCEL", "").lower() == "1",
     SESSION_COOKIE_SAMESITE="Lax",
-    PERMANENT_SESSION_LIFETIME=3600,
-    MAX_CONTENT_LENGTH=1024 * 1024,
+    PERMANENT_SESSION_LIFETIME=1600,
+    MAX_CONTENT_LENGTH=200 * 200,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -47,10 +47,10 @@ logger = logging.getLogger(__name__)
 # CONSERVATIVE EMAIL SETTINGS
 # --------------------------------------------------
 SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 465
-SMTP_TIMEOUT = 25
-MAX_RECIPIENTS = 10
-SEND_INTERVAL_SECONDS = 4
+SMTP_PORT = 235
+SMTP_TIMEOUT = 24
+MAX_RECIPIENTS = 8
+SEND_INTERVAL_SECONDS = 0.50
 
 
 # --------------------------------------------------
