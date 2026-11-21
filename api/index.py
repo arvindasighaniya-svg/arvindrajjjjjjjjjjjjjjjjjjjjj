@@ -680,7 +680,7 @@ def send_batch():
 # --------------------------------------------------
 
 @app.errorhandler(413)
-def request_too_large(error):
+def request_too_large(error): 
     return json_error(
         "Request is too large.",
         413
