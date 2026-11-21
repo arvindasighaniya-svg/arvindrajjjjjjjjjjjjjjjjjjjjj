@@ -5,7 +5,7 @@ import ssl
 import smtplib
 import time
 import random
-import unicodedata
+import unicodedata 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pathlib import Path
