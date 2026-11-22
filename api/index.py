@@ -1,702 +1,286 @@
-import os
-import re
-import hmac
-import ssl
-import smtplib
-import time
-import random
-import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from pathlib import Path
-from html import unescape
-from email.message import EmailMessage
-from email.utils import formataddr, parseaddr, make_msgid, formatdate
-
-from flask import (
-    Flask, jsonify, redirect, render_template,
-    request, session, url_for
-)
-
-
-# --------------------------------------------------
-# APP CONFIGURATION
-# --------------------------------------------------
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-app = Flask(
-    __name__,
-    template_folder=str(PROJECT_ROOT / "templates"),
-    static_folder=str(PROJECT_ROOT / "static"),
-    static_url_path="/static"
-)
-
-SECRET_KEY = os.environ.get("SESSION_SECRET")
-
-if not SECRET_KEY and os.environ.get("VERCEL") == "1":
-    raise RuntimeError("SESSION_SECRET must be configured.")
-
-app.secret_key = SECRET_KEY or "local-development-only-change-this"
-
-app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=os.environ.get("VERCEL", "").lower() == "1",
-    SESSION_COOKIE_SAMESITE="Lax",
-    PERMANENT_SESSION_LIFETIME=3600,
-    MAX_CONTENT_LENGTH=1024 * 1024
-)
-
-
-# --------------------------------------------------
-# EMAIL SETTINGS
-# --------------------------------------------------
-
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 465
-
-MAX_RECIPIENTS = 25
-MAX_WORKERS = 3
-MAX_RETRIES = 2
-
-
-# --------------------------------------------------
-# RESPONSE HELPERS
-# --------------------------------------------------
-
-def json_error(message, status=400):
-    return jsonify({"error": message}), status
-
-
-# --------------------------------------------------
-# EMAIL VALIDATION
-# --------------------------------------------------
-
-def clean_email(value):
-    if not isinstance(value, str):
-        return ""
-
-    value = unicodedata.normalize("NFKC", value)
-
-    value = "".join(
-        ch for ch in value
-        if ch.isprintable()
-        and not unicodedata.category(ch).startswith("C")
-    )
-
-    value = value.replace("\xa0", "").strip()
-    value = value.replace(" ", "")
-
-    return value
-
-
-def valid_email(value):
-    value = clean_email(value)
-
-    if not value or len(value) > 254:
-        return False
-
-    _, address = parseaddr(value)
-
-    if address != value or "@" not in address:
-        return False
-
-    local, domain = address.rsplit("@", 1)
-
-    if not local or not domain:
-        return False
-
-    if len(local) > 64:
-        return False
-
-    if "." not in domain:
-        return False
-
-    if domain.startswith(".") or domain.endswith("."):
-        return False
-
-    if ".." in address:
-        return False
-
-    return True
-
-
-def recipient_address(item):
-    if isinstance(item, str):
-        return clean_email(
-            item.replace('"', "").replace("'", "")
-        )
-
-    if isinstance(item, dict):
-        return clean_email(
-            str(item.get("email", ""))
-            .replace('"', "")
-            .replace("'", "")
-        )
-
-    return ""
-
-
-# --------------------------------------------------
-# SPINTAX
-# --------------------------------------------------
-
-def expand_spintax(text):
-    pattern = re.compile(r"\{([^{}]+)\}")
-
-    while pattern.search(text):
-        text = pattern.sub(
-            lambda match: random.choice(
-                match.group(1).split("|")
-            ),
-            text
-        )
-
-    return text
-
-
-# --------------------------------------------------
-# HTML TO TEXT
-# --------------------------------------------------
-
-def html_to_plain_text(html_content):
-    text = re.sub(
-        r"(?i)<br\s*/?>",
-        "\n",
-        html_content
-    )
-
-    text = re.sub(
-        r"(?i)</(p|div|tr|li|h[1-6])>",
-        "\n",
-        text
-    )
-
-    text = re.sub(
-        r"<[^>]+?>",
-        "",
-        text
-    )
-
-    text = unescape(text)
-
-    text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        text
-    )
-
-    return text.strip()
-
-
-# --------------------------------------------------
-# EMAIL BUILDER
-# --------------------------------------------------
-
-def build_email(
-    sender_email,
-    sender_name,
-    recipient,
-    subject,
-    body,
-    html_mode=False
-):
-    local_part = recipient.split("@", 1)[0]
-
-    display_name = re.sub(
-        r"[._-]+",
-        " ",
-        local_part
-    ).strip().title() or local_part
-
-    personalized_body = (
-        body.replace("{{name}}", display_name)
-        .replace("{{username}}", local_part)
-        .replace("{{email}}", recipient)
-    )
-
-    personalized_body = expand_spintax(personalized_body)
-    personalized_subject = expand_spintax(subject)
-
-    message = EmailMessage()
-
-    clean_sender_name = re.sub(
-        r"[\r\n]+",
-        " ",
-        sender_name
-    ).strip()[:100]
-
-    clean_subject = re.sub(
-        r"[\r\n]+",
-        " ",
-        personalized_subject
-    ).strip()
-
-    message["Subject"] = clean_subject
-
-    message["From"] = (
-        formataddr((clean_sender_name, sender_email))
-        if clean_sender_name
-        else sender_email
-    )
-
-    message["To"] = recipient
-    message["Reply-To"] = sender_email
-    message["Date"] = formatdate(localtime=True)
-    message["Message-ID"] = make_msgid(
-        domain=sender_email.split("@", 1)[1]
-    )
-
-    if html_mode:
-        plain_text = html_to_plain_text(personalized_body)
-
-        message.set_content(
-            plain_text or "Please view this email in an HTML-compatible email client.",
-            charset="utf-8"
-        )
-
-        message.add_alternative(
-            personalized_body,
-            subtype="html",
-            charset="utf-8"
-        )
-    else:
-        message.set_content(
-            personalized_body,
-            charset="utf-8"
-        )
-
-    return message
-
-
-# --------------------------------------------------
-# SMTP CONNECTION
-# --------------------------------------------------
-
-def create_smtp_connection(sender_email, app_password):
-    context = ssl.create_default_context()
-
-    smtp = smtplib.SMTP_SSL(
-        SMTP_HOST,
-        SMTP_PORT,
-        context=context,
-        timeout=30
-    )
-
-    smtp.login(sender_email, app_password)
-    return smtp
-
-
-# --------------------------------------------------
-# SINGLE EMAIL SENDER
-# --------------------------------------------------
-
-def send_single_email(
-    smtp,
-    sender_email,
-    sender_name,
-    subject,
-    body,
-    html_mode,
-    recipient
-):
-    message = build_email(
-        sender_email=sender_email,
-        sender_name=sender_name,
-        recipient=recipient,
-        subject=subject,
-        body=body,
-        html_mode=html_mode
-    )
-
-    smtp.send_message(message)
-
-    return {
-        "status": "sent",
-        "email": recipient,
-        "detail": "Accepted by Gmail"
-    }
-
-
-# --------------------------------------------------
-# LOGIN PAGE
-# --------------------------------------------------
-
-@app.get("/")
-def home():
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
-
-    return render_template("index.html")
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "GET":
-        if session.get("logged_in"):
-            return redirect(url_for("home"))
-
-        return render_template("login.html")
-
-    supplied_password = request.form.get("password", "")
-    configured_password = os.environ.get("LOGIN_PASSWORD", "")
-
-    if not configured_password:
-        return render_template(
-            "login.html",
-            error="LOGIN_PASSWORD is not configured."
-        ), 500
-
-    if not hmac.compare_digest(supplied_password, configured_password):
-        return render_template(
-            "login.html",
-            error="Incorrect workspace password."
-        ), 401
-
-    session.clear()
-    session["logged_in"] = True
-    session.permanent = True
-
-    return redirect(url_for("home"))
-
-
-# --------------------------------------------------
-# LOGOUT
-# --------------------------------------------------
-
-@app.route("/logout", methods=["GET", "POST"])
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-
-# --------------------------------------------------
-# BATCH EMAIL SENDER
-# --------------------------------------------------
-
-@app.post("/send-batch")
-def send_batch():
-    if not session.get("logged_in"):
-        return json_error(
-            "Your session has expired. Please sign in again.",
-            401
-        )
-
-    data = request.get_json(silent=True)
-
-    if not isinstance(data, dict):
-        return json_error(
-            "A valid JSON request body is required."
-        )
-
-    sender_email = clean_email(
-        str(
-            data.get("senderEmail")
-            or data.get("gmail")
-            or ""
-        ).lower()
-    )
-
-    app_password = str(
-        data.get("appPassword")
-        or data.get("app_password")
-        or ""
-    ).strip().replace(" ", "")
-
-    sender_name = str(
-        data.get("senderName")
-        or data.get("sender_name")
-        or ""
-    ).strip()[:100]
-
-    subject = str(data.get("subject") or "").strip()
-    body = str(data.get("body") or "")
-
-    html_mode = (
-        data.get("htmlMode", data.get("is_html", False))
-        is True
-    )
-
-    consent = (
-        data.get("consentConfirmed", data.get("consent_confirmed", False))
-        is True
-    )
-
-    raw_recipients = data.get("recipients", [])
-
-    if (
-        not sender_email.endswith("@gmail.com")
-        or not valid_email(sender_email)
-    ):
-        return json_error(
-            "Please enter a valid Gmail sender address."
-        )
-
-    if not app_password:
-        return json_error(
-            "Google App Password is required."
-        )
-
-    if not subject or len(subject) > 998:
-        return json_error(
-            "Please enter a valid email subject."
-        )
-
-    if not body.strip():
-        return json_error(
-            "Email message body is required."
-        )
-
-    if not consent:
-        return json_error(
-            "Please confirm that all recipients have consented to receive your email."
-        )
-
-    if not isinstance(raw_recipients, list):
-        return json_error(
-            "Recipients must be provided as a list."
-        )
-
-    recipients = []
-    seen = set()
-
-    for item in raw_recipients:
-        address = recipient_address(item)
-
-        if not address:
-            continue
-
-        key = address.lower()
-
-        if key not in seen:
-            seen.add(key)
-            recipients.append(address)
-
-    if not recipients:
-        return json_error(
-            "Please provide at least one valid recipient."
-        )
-
-    if len(recipients) > MAX_RECIPIENTS:
-        return json_error(
-            f"Maximum {MAX_RECIPIENTS} recipients allowed per batch."
-        )
-
-    invalid = [
-        address
-        for address in recipients
-        if not valid_email(address)
-    ]
-
-    if invalid:
-        return json_error(
-            "Invalid email addresses: "
-            + ", ".join(invalid[:5])
-        )
-
-    results = []
-
-    def send_recipient_group(group):
-        group_results = []
-        smtp = None
-
-        try:
-            smtp = create_smtp_connection(
-                sender_email,
-                app_password
-            )
-
-            for recipient in group:
-                attempts = 0
-                sent = False
-                last_error = "Unknown SMTP error"
-
-                while attempts < MAX_RETRIES and not sent:
-                    attempts += 1
-
-                    try:
-                        if smtp is None:
-                            smtp = create_smtp_connection(
-                                sender_email,
-                                app_password
-                            )
-
-                        result = send_single_email(
-                            smtp=smtp,
-                            sender_email=sender_email,
-                            sender_name=sender_name,
-                            subject=subject,
-                            body=body,
-                            html_mode=html_mode,
-                            recipient=recipient
-                        )
-
-                        group_results.append(result)
-                        sent = True
-
-                    except smtplib.SMTPAuthenticationError:
-                        last_error = (
-                            "Gmail authentication failed. "
-                            "Check your Google App Password."
-                        )
-                        if smtp:
-                            try:
-                                smtp.quit()
-                            except Exception:
-                                pass
-                        smtp = None
-                        break
-
-                    except smtplib.SMTPRecipientsRefused:
-                        last_error = "Gmail refused this recipient address."
-                        break
-
-                    except smtplib.SMTPDataError as exc:
-                        code = getattr(exc, "smtp_code", 0)
-                        last_error = str(exc)[:200]
-
-                        if not (400 <= code < 500):
-                            break
-
-                        if smtp:
-                            try:
-                                smtp.quit()
-                            except Exception:
-                                pass
-                        smtp = None
-
-                        if attempts < MAX_RETRIES:
-                            time.sleep(2)
-
-                    except (
-                        smtplib.SMTPServerDisconnected,
-                        ConnectionError,
-                        TimeoutError,
-                        OSError
-                    ) as exc:
-                        last_error = str(exc)[:200]
-
-                        if smtp:
-                            try:
-                                smtp.close()
-                            except Exception:
-                                pass
-                        smtp = None
-
-                        if attempts < MAX_RETRIES:
-                            time.sleep(2)
-
-                    except Exception as exc:
-                        last_error = str(exc)[:200]
-                        break
-
-                if not sent:
-                    group_results.append({
-                        "status": "failed",
-                        "email": recipient,
-                        "detail": last_error
-                    })
-
-        except smtplib.SMTPAuthenticationError:
-            group_results.extend({
-                "status": "failed",
-                "email": recipient,
-                "detail": (
-                    "Gmail authentication failed. "
-                    "Check your Google App Password."
-                )
-            } for recipient in group)
-
-        except Exception as exc:
-            group_results.extend({
-                "status": "failed",
-                "email": recipient,
-                "detail": f"SMTP connection failed: {str(exc)[:180]}"
-            } for recipient in group)
-
-        finally:
-            if smtp:
-                try:
-                    smtp.quit()
-                except Exception:
-                    pass
-
-        return group_results
-
-    worker_count = min(MAX_WORKERS, len(recipients))
-    recipient_groups = [
-        recipients[index::worker_count]
-        for index in range(worker_count)
-    ]
-
-    try:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                executor.submit(send_recipient_group, group)
-                for group in recipient_groups
-            ]
-
-            for future in as_completed(futures):
-                try:
-                    results.extend(future.result())
-                except Exception as exc:
-                    results.append({
-                        "status": "failed",
-                        "email": "",
-                        "detail": f"Worker execution failed: {str(exc)[:200]}"
-                    })
-
-    except Exception as exc:
-        return jsonify({
-            "error": "Batch processing failed.",
-            "detail": str(exc)[:200],
-            "results": results
-        }), 502
-
-    result_order = {email: index for index, email in enumerate(recipients)}
-    results.sort(key=lambda item: result_order.get(item.get("email"), len(recipients)))
-
-    sent_count = sum(
-        1 for item in results
-        if item["status"] == "sent"
-    )
-
-    failed_count = sum(
-        1 for item in results
-        if item["status"] == "failed"
-    )
-
-    return jsonify({
-        "success": failed_count == 0,
-        "total": len(recipients),
-        "accepted": sent_count,
-        "failed": failed_count,
-        "results": results
-    }), 200
-
-
-# --------------------------------------------------
-# ERROR HANDLERS
-# --------------------------------------------------
-
-@app.errorhandler(413)
-def request_too_large(error):
-    return json_error(
-        "Request is too large.",
-        413
-    )
-
-
-@app.errorhandler(500)
-def internal_error(error):
-    return json_error(
-        "An internal server error occurred.",
-        500
-    )
-
-
-# --------------------------------------------------
-# VERCEL ENTRY POINT
-# --------------------------------------------------
-
-application = app
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --bg: #f4f7fb;
+  --panel: #fff;
+  --line: #d9e2ef;
+  --text: #071a38;
+  --muted: #71829e;
+  --blue: #3978ff;
+  --green: #09b781;
+  --red: #ff6269;
+  --orange: #f59e0b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px Inter, Arial, sans-serif;
+}
+
+.topbar {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 22px;
+  gap: 16px;
+}
+
+.app-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 21px;
+  font-weight: 800;
+}
+
+.plane { font-size: 25px; transform: rotate(-15deg); }
+
+.logout-btn {
+  color: #315db9;
+  background: #fff;
+  border: 1px solid var(--line);
+  padding: 9px 14px;
+  border-radius: 9px;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.dashboard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, .93fr);
+  gap: 20px;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 0 12px 24px;
+  align-items: start;
+}
+
+.card {
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid #e1e8f1;
+  border-radius: 12px;
+  padding: 28px;
+  box-shadow: 0 7px 20px rgba(21, 45, 83, .035);
+}
+
+h2 { margin: 0; font-size: 17px; font-weight: 800; }
+
+label { display: block; font-weight: 700; margin-bottom: 7px; }
+
+input:not([type="checkbox"]), textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: #fff;
+  font: inherit;
+}
+
+input:focus, textarea:focus {
+  outline: 2px solid #dce7ff;
+  border-color: #8aabff;
+}
+
+input:disabled { background: #f5f7fb; color: var(--muted); }
+
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 17px 14px;
+}
+
+.two-col small, .recipients-card > small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 5px;
+}
+
+.password-wrap { position: relative; }
+.password-wrap input { padding-right: 42px; }
+.password-wrap button {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 5px;
+}
+
+.body-heading {
+  margin-top: 17px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mode-switch { display: flex; gap: 5px; }
+.mode {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 9px;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+.mode.active {
+  color: var(--blue);
+  border-color: #cbdcff;
+  background: #eff5ff;
+}
+
+.message-body {
+  height: 264px;
+  margin-top: 5px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.info-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+  padding: 12px;
+  border: 1px solid #d8e5ff;
+  border-radius: 8px;
+  background: #f6faff;
+  color: #1762d5;
+}
+.shuffle { font-size: 21px; }
+.info-strip strong, .info-strip small { display: block; }
+.info-strip strong { font-size: 11px; }
+.info-strip small { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+.security-heading { margin: 19px 0 14px; font-size: 13px; }
+.consent-row { display: flex; align-items: flex-start; gap: 8px; }
+.consent-row input { margin-top: 3px; }
+.consent-row label { font-weight: 400; line-height: 1.5; }
+.help-text { color: var(--muted); font-size: 11px; line-height: 1.5; }
+
+.right-column { display: grid; gap: 20px; }
+.section-heading { display: flex; justify-content: space-between; gap: 12px; }
+.section-heading p { margin: 4px 0 10px 22px; color: var(--muted); font-size: 10px; }
+.badge {
+  align-self: start;
+  background: #f0f5ff;
+  color: var(--blue);
+  border-radius: 20px;
+  padding: 6px 10px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.recipient-input { height: 135px; resize: vertical; }
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 5px;
+}
+.stat {
+  min-height: 91px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.stat span { font-size: 9px; color: #607493; font-weight: 600; }
+.stat strong { color: var(--blue); font-size: 24px; }
+.stat strong.green { color: var(--green); }
+.stat strong.red { color: #ff4646; }
+.stat strong.orange { color: var(--orange); }
+
+.progress-track {
+  height: 7px;
+  margin-top: 21px;
+  background: #e2e8f0;
+  border-radius: 20px;
+  overflow: hidden;
+}
+#progressBar {
+  width: 0;
+  height: 100%;
+  background: var(--green);
+  transition: width .2s ease;
+}
+.status { text-align: center; font-weight: 700; margin: 16px 0 22px; }
+
+.action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.action-row button {
+  border: 0;
+  border-radius: 8px;
+  min-height: 40px;
+  padding: 10px;
+  font: inherit;
+  font-weight: 700;
+  color: white;
+  cursor: pointer;
+}
+.send-btn { background: #09b781; }
+.stop-btn { background: #ff777d; }
+.action-row button:disabled { opacity: .65; cursor: not-allowed; }
+
+.results { margin-top: 12px; max-height: 240px; overflow-y: auto; }
+.result-row {
+  padding: 9px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.result-row.sent { color: #087e58; }
+.result-row.failed { color: #c72d38; }
+
+.login-page { display: grid; place-items: center; padding: 20px; }
+.login-card {
+  width: min(100%, 430px);
+  background: white;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+.login-card h1 { font-size: 27px; }
+.login-card h1 span { color: var(--blue); }
+.primary-btn {
+  margin-top: 20px;
+  width: 100%;
+  padding: 12px 20px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--blue);
+  color: white;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.error { color: #a51e2b; background: #fff0f1; padding: 12px; border-radius: 8px; }
+
+@media (max-width: 850px) {
+  .dashboard { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  .topbar { padding: 12px; }
+  .app-title { font-size: 17px; }
+  .card { padding: 18px; }
+  .two-col { grid-template-columns: 1fr; }
+  .message-body { height: 220px; }
+  .action-row { gap: 8px; }
+}
