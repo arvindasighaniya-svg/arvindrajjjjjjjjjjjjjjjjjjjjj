@@ -50,7 +50,7 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 SMTP_TIMEOUT = 25
 MAX_RECIPIENTS = 10
-SEND_INTERVAL_SECONDS = 4
+SEND_INTERVAL_SECONDS = 0.50
 
 
 # --------------------------------------------------
