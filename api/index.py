@@ -280,7 +280,7 @@ def create_smtp_connection(sender_email, app_password):
         SMTP_HOST,
         SMTP_PORT,
         context=context,
-        timeout=15
+        timeout=12
     )
 
     smtp.login(sender_email, app_password)
@@ -524,7 +524,7 @@ def send_batch():
                                 app_password
                             )
 
-                        time.sleep(random.uniform(0.03, 0.08))
+                        time.sleep(random.uniform(0.02, 0.06))
 
                         result = send_single_email(
                             smtp=smtp,
@@ -571,7 +571,7 @@ def send_batch():
                         smtp = None
 
                         if attempts < MAX_RETRIES:
-                            time.sleep(0.5)
+                            time.sleep(0.4)
 
                     except (
                         smtplib.SMTPServerDisconnected,
@@ -589,7 +589,7 @@ def send_batch():
                         smtp = None
 
                         if attempts < MAX_RETRIES:
-                            time.sleep(0.5)
+                            time.sleep(0.4)
 
                     except Exception as exc:
                         last_error = str(exc)[:200]
