@@ -242,7 +242,7 @@ def build_email(
 
     message["To"] = recipient
     message["Reply-To"] = sender_email
-    message["Date"] = formatdate(localtime=False)
+    message["Date"] = formatdate(localtime=True)
     message["Message-ID"] = make_msgid(
         domain=sender_email.split("@", 1)[1]
     )
@@ -490,4 +490,213 @@ def send_batch():
 
     if invalid:
         return json_error(
-            "Invalid
+            "Invalid email addresses: "
+            + ", ".join(invalid[:5])
+        )
+
+    results = []
+
+    def send_recipient_group(group):
+        group_results = []
+        smtp = None
+
+        try:
+            smtp = create_smtp_connection(
+                sender_email,
+                app_password
+            )
+
+            for recipient in group:
+                attempts = 0
+                sent = False
+                last_error = "Unknown SMTP error"
+
+                while attempts < MAX_RETRIES and not sent:
+                    attempts += 1
+
+                    try:
+                        if smtp is None:
+                            smtp = create_smtp_connection(
+                                sender_email,
+                                app_password
+                            )
+
+                        result = send_single_email(
+                            smtp=smtp,
+                            sender_email=sender_email,
+                            sender_name=sender_name,
+                            subject=subject,
+                            body=body,
+                            html_mode=html_mode,
+                            recipient=recipient
+                        )
+
+                        group_results.append(result)
+                        sent = True
+
+                    except smtplib.SMTPAuthenticationError:
+                        last_error = (
+                            "Gmail authentication failed. "
+                            "Check your Google App Password."
+                        )
+                        if smtp:
+                            try:
+                                smtp.quit()
+                            except Exception:
+                                pass
+                        smtp = None
+                        break
+
+                    except smtplib.SMTPRecipientsRefused:
+                        last_error = "Gmail refused this recipient address."
+                        break
+
+                    except smtplib.SMTPDataError as exc:
+                        code = getattr(exc, "smtp_code", 0)
+                        last_error = str(exc)[:200]
+
+                        if not (400 <= code < 500):
+                            break
+
+                        if smtp:
+                            try:
+                                smtp.quit()
+                            except Exception:
+                                pass
+                        smtp = None
+
+                        if attempts < MAX_RETRIES:
+                            time.sleep(2)
+
+                    except (
+                        smtplib.SMTPServerDisconnected,
+                        ConnectionError,
+                        TimeoutError,
+                        OSError
+                    ) as exc:
+                        last_error = str(exc)[:200]
+
+                        if smtp:
+                            try:
+                                smtp.close()
+                            except Exception:
+                                pass
+                        smtp = None
+
+                        if attempts < MAX_RETRIES:
+                            time.sleep(2)
+
+                    except Exception as exc:
+                        last_error = str(exc)[:200]
+                        break
+
+                if not sent:
+                    group_results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": last_error
+                    })
+
+        except smtplib.SMTPAuthenticationError:
+            group_results.extend({
+                "status": "failed",
+                "email": recipient,
+                "detail": (
+                    "Gmail authentication failed. "
+                    "Check your Google App Password."
+                )
+            } for recipient in group)
+
+        except Exception as exc:
+            group_results.extend({
+                "status": "failed",
+                "email": recipient,
+                "detail": f"SMTP connection failed: {str(exc)[:180]}"
+            } for recipient in group)
+
+        finally:
+            if smtp:
+                try:
+                    smtp.quit()
+                except Exception:
+                    pass
+
+        return group_results
+
+    worker_count = min(MAX_WORKERS, len(recipients))
+    recipient_groups = [
+        recipients[index::worker_count]
+        for index in range(worker_count)
+    ]
+
+    try:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(send_recipient_group, group)
+                for group in recipient_groups
+            ]
+
+            for future in as_completed(futures):
+                try:
+                    results.extend(future.result())
+                except Exception as exc:
+                    results.append({
+                        "status": "failed",
+                        "email": "",
+                        "detail": f"Worker execution failed: {str(exc)[:200]}"
+                    })
+
+    except Exception as exc:
+        return jsonify({
+            "error": "Batch processing failed.",
+            "detail": str(exc)[:200],
+            "results": results
+        }), 502
+
+    result_order = {email: index for index, email in enumerate(recipients)}
+    results.sort(key=lambda item: result_order.get(item.get("email"), len(recipients)))
+
+    sent_count = sum(
+        1 for item in results
+        if item["status"] == "sent"
+    )
+
+    failed_count = sum(
+        1 for item in results
+        if item["status"] == "failed"
+    )
+
+    return jsonify({
+        "success": failed_count == 0,
+        "total": len(recipients),
+        "accepted": sent_count,
+        "failed": failed_count,
+        "results": results
+    }), 200
+
+
+# --------------------------------------------------
+# ERROR HANDLERS
+# --------------------------------------------------
+
+@app.errorhandler(413)
+def request_too_large(error):
+    return json_error(
+        "Request is too large.",
+        413
+    )
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    return json_error(
+        "An internal server error occurred.",
+        500
+    )
+
+
+# --------------------------------------------------
+# VERCEL ENTRY POINT
+# --------------------------------------------------
+
+application = app
