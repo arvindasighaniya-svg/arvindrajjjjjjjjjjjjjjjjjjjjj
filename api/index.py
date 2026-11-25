@@ -137,22 +137,6 @@ def recipient_address(item):
     return ""
 
 
-def configured_allowed_recipients():
-    """
-    Server-side allowlist of addresses with documented permission to receive
-    these messages. The browser checkbox is not proof of consent.
-    """
-    raw = os.environ.get("ALLOWED_RECIPIENTS", "")
-    addresses = set()
-
-    for item in raw.split(","):
-        address = clean_email(item).lower()
-        if address and valid_email(address):
-            addresses.add(address)
-
-    return addresses
-
-
 # --------------------------------------------------
 # SPINTAX
 # --------------------------------------------------
@@ -330,7 +314,7 @@ def send_single_email(
     return {
         "status": "sent",
         "email": recipient,
-        "detail": "Accepted by Gmail SMTP; inbox placement is not confirmed"
+        "detail": "Accepted by Gmail"
     }
 
 
@@ -508,29 +492,6 @@ def send_batch():
         return json_error(
             "Invalid email addresses: "
             + ", ".join(invalid[:5])
-        )
-
-    # Enforce permission on the server. A client-side checkbox alone can
-    # be forged, so only explicitly configured opted-in addresses are allowed.
-    allowed_recipients = configured_allowed_recipients()
-
-    if not allowed_recipients:
-        return json_error(
-            "No opted-in recipients are configured. Add only consented addresses "
-            "to the ALLOWED_RECIPIENTS Vercel environment variable.",
-            403
-        )
-
-    not_allowed = [
-        address for address in recipients
-        if address.lower() not in allowed_recipients
-    ]
-
-    if not_allowed:
-        return json_error(
-            "These recipients are not on the opted-in allowlist: "
-            + ", ".join(not_allowed[:5]),
-            403
         )
 
     results = []
