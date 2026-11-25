@@ -6,8 +6,8 @@ import smtplib
 import time
 import random
 import unicodedata
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from pathlib import Path
 from html import unescape
 from email.message import EmailMessage
@@ -33,6 +33,7 @@ app = Flask(
 )
 
 SECRET_KEY = os.environ.get("SESSION_SECRET")
+
 if not SECRET_KEY and os.environ.get("VERCEL") == "1":
     raise RuntimeError("SESSION_SECRET must be configured.")
 
@@ -54,12 +55,9 @@ app.config.update(
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
-# Deliberately conservative: send only to addresses explicitly
-# configured by the account owner in ALLOWED_RECIPIENTS.
 MAX_RECIPIENTS = 25
-MAX_WORKERS = 1
-MAX_RETRIES = 1
-SEND_DELAY_SECONDS = 2
+MAX_WORKERS = 8
+MAX_RETRIES = 2
 
 
 # --------------------------------------------------
@@ -71,7 +69,7 @@ def json_error(message, status=400):
 
 
 # --------------------------------------------------
-# EMAIL VALIDATION AND RECIPIENT APPROVAL
+# EMAIL VALIDATION
 # --------------------------------------------------
 
 def clean_email(value):
@@ -79,12 +77,17 @@ def clean_email(value):
         return ""
 
     value = unicodedata.normalize("NFKC", value)
+
     value = "".join(
         ch for ch in value
         if ch.isprintable()
         and not unicodedata.category(ch).startswith("C")
     )
-    return value.replace("\xa0", "").strip().replace(" ", "")
+
+    value = value.replace("\xa0", "").strip()
+    value = value.replace(" ", "")
+
+    return value
 
 
 def valid_email(value):
@@ -94,20 +97,25 @@ def valid_email(value):
         return False
 
     _, address = parseaddr(value)
+
     if address != value or "@" not in address:
         return False
 
     local, domain = address.rsplit("@", 1)
 
-    if (
-        not local
-        or not domain
-        or len(local) > 64
-        or "." not in domain
-        or domain.startswith(".")
-        or domain.endswith(".")
-        or ".." in address
-    ):
+    if not local or not domain:
+        return False
+
+    if len(local) > 64:
+        return False
+
+    if "." not in domain:
+        return False
+
+    if domain.startswith(".") or domain.endswith("."):
+        return False
+
+    if ".." in address:
         return False
 
     return True
@@ -115,55 +123,69 @@ def valid_email(value):
 
 def recipient_address(item):
     if isinstance(item, str):
-        return clean_email(item.strip("\"'"))
+        return clean_email(
+            item.replace('"', "").replace("'", "")
+        )
 
     if isinstance(item, dict):
-        return clean_email(str(item.get("email", "")).strip("\"'"))
+        return clean_email(
+            str(item.get("email", ""))
+            .replace('"', "")
+            .replace("'", "")
+        )
 
     return ""
 
 
-def configured_recipient_allowlist():
-    """
-    Vercel Environment Variable:
-    ALLOWED_RECIPIENTS=person1@example.com,person2@example.com
-
-    Only recipients listed here can receive mail. This is an
-    owner-managed allowlist; do not add addresses without permission.
-    """
-    raw = os.environ.get("ALLOWED_RECIPIENTS", "")
-    approved = set()
-
-    for value in raw.split(","):
-        address = clean_email(value.lower())
-        if valid_email(address):
-            approved.add(address)
-
-    return approved
-
-
 # --------------------------------------------------
-# SPINTAX AND HTML-TO-TEXT
+# SPINTAX
 # --------------------------------------------------
 
-def expand_spintax(value):
+def expand_spintax(text):
     pattern = re.compile(r"\{([^{}]+)\}")
 
-    while pattern.search(value):
-        value = pattern.sub(
-            lambda match: random.choice(match.group(1).split("|")),
-            value
+    while pattern.search(text):
+        text = pattern.sub(
+            lambda match: random.choice(
+                match.group(1).split("|")
+            ),
+            text
         )
 
-    return value
+    return text
 
+
+# --------------------------------------------------
+# HTML TO TEXT
+# --------------------------------------------------
 
 def html_to_plain_text(html_content):
-    text = re.sub(r"(?i)<br\s*/?>", "\n", html_content)
-    text = re.sub(r"(?i)</(p|div|tr|li|h[1-6])>", "\n", text)
-    text = re.sub(r"<[^>]+?>", "", text)
+    text = re.sub(
+        r"(?i)<br\s*/?>",
+        "\n",
+        html_content
+    )
+
+    text = re.sub(
+        r"(?i)</(p|div|tr|li|h[1-6])>",
+        "\n",
+        text
+    )
+
+    text = re.sub(
+        r"<[^>]+?>",
+        "",
+        text
+    )
+
     text = unescape(text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
+
     return text.strip()
 
 
@@ -180,8 +202,12 @@ def build_email(
     html_mode=False
 ):
     local_part = recipient.split("@", 1)[0]
-    display_name = re.sub(r"[._-]+", " ", local_part).strip().title()
-    display_name = display_name or local_part
+
+    display_name = re.sub(
+        r"[._-]+",
+        " ",
+        local_part
+    ).strip().title() or local_part
 
     personalized_body = (
         body.replace("{{name}}", display_name)
@@ -194,36 +220,51 @@ def build_email(
 
     message = EmailMessage()
 
-    clean_sender_name = re.sub(r"[\r\n]+", " ", sender_name).strip()[:100]
+    clean_sender_name = re.sub(
+        r"[\r\n]+",
+        " ",
+        sender_name
+    ).strip()[:100]
+
     clean_subject = re.sub(
-        r"[\r\n]+", " ", personalized_subject
+        r"[\r\n]+",
+        " ",
+        personalized_subject
     ).strip()
 
     message["Subject"] = clean_subject
+
     message["From"] = (
         formataddr((clean_sender_name, sender_email))
-        if clean_sender_name else sender_email
+        if clean_sender_name
+        else sender_email
     )
+
     message["To"] = recipient
     message["Reply-To"] = sender_email
-    message["Date"] = formatdate(localtime=True)
+    message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(
         domain=sender_email.split("@", 1)[1]
     )
 
     if html_mode:
         plain_text = html_to_plain_text(personalized_body)
+
         message.set_content(
             plain_text or "Please view this email in an HTML-compatible email client.",
             charset="utf-8"
         )
+
         message.add_alternative(
             personalized_body,
             subtype="html",
             charset="utf-8"
         )
     else:
-        message.set_content(personalized_body, charset="utf-8")
+        message.set_content(
+            personalized_body,
+            charset="utf-8"
+        )
 
     return message
 
@@ -234,12 +275,14 @@ def build_email(
 
 def create_smtp_connection(sender_email, app_password):
     context = ssl.create_default_context()
+
     smtp = smtplib.SMTP_SSL(
         SMTP_HOST,
         SMTP_PORT,
         context=context,
-        timeout=30
+        timeout=12
     )
+
     smtp.login(sender_email, app_password)
     return smtp
 
@@ -265,6 +308,7 @@ def send_single_email(
         body=body,
         html_mode=html_mode
     )
+
     smtp.send_message(message)
 
     return {
@@ -282,6 +326,7 @@ def send_single_email(
 def home():
     if not session.get("logged_in"):
         return redirect(url_for("login"))
+
     return render_template("index.html")
 
 
@@ -290,6 +335,7 @@ def login():
     if request.method == "GET":
         if session.get("logged_in"):
             return redirect(url_for("home"))
+
         return render_template("login.html")
 
     supplied_password = request.form.get("password", "")
@@ -301,7 +347,10 @@ def login():
             error="LOGIN_PASSWORD is not configured."
         ), 500
 
-    if not hmac.compare_digest(supplied_password, configured_password):
+    if not hmac.compare_digest(
+        supplied_password,
+        configured_password
+    ):
         return render_template(
             "login.html",
             error="Incorrect workspace password."
@@ -310,6 +359,7 @@ def login():
     session.clear()
     session["logged_in"] = True
     session.permanent = True
+
     return redirect(url_for("home"))
 
 
@@ -336,206 +386,296 @@ def send_batch():
         )
 
     data = request.get_json(silent=True)
+
     if not isinstance(data, dict):
-        return json_error("A valid JSON request body is required.")
+        return json_error(
+            "A valid JSON request body is required."
+        )
 
     sender_email = clean_email(
-        str(data.get("senderEmail") or data.get("gmail") or "").lower()
+        str(
+            data.get("senderEmail")
+            or data.get("gmail")
+            or ""
+        ).lower()
     )
+
     app_password = str(
-        data.get("appPassword") or data.get("app_password") or ""
+        data.get("appPassword")
+        or data.get("app_password")
+        or ""
     ).strip().replace(" ", "")
+
     sender_name = str(
-        data.get("senderName") or data.get("sender_name") or ""
+        data.get("senderName")
+        or data.get("sender_name")
+        or ""
     ).strip()[:100]
+
     subject = str(data.get("subject") or "").strip()
     body = str(data.get("body") or "")
 
     html_mode = (
-        data.get("htmlMode", data.get("is_html", False)) is True
+        data.get("htmlMode", data.get("is_html", False))
+        is True
     )
+
     consent = (
         data.get("consentConfirmed", data.get("consent_confirmed", False))
         is True
     )
+
     raw_recipients = data.get("recipients", [])
 
-    if not sender_email.endswith("@gmail.com") or not valid_email(sender_email):
-        return json_error("Please enter a valid Gmail sender address.")
+    if (
+        not sender_email.endswith("@gmail.com")
+        or not valid_email(sender_email)
+    ):
+        return json_error(
+            "Please enter a valid Gmail sender address."
+        )
 
     if not app_password:
-        return json_error("Google App Password is required.")
+        return json_error(
+            "Google App Password is required."
+        )
 
     if not subject or len(subject) > 998:
-        return json_error("Please enter a valid email subject.")
+        return json_error(
+            "Please enter a valid email subject."
+        )
 
     if not body.strip():
-        return json_error("Email message body is required.")
+        return json_error(
+            "Email message body is required."
+        )
 
     if not consent:
         return json_error(
-            "Please confirm that every recipient has opted in to receive your email."
+            "Please confirm that all recipients have consented to receive your email."
         )
 
     if not isinstance(raw_recipients, list):
-        return json_error("Recipients must be provided as a list.")
+        return json_error(
+            "Recipients must be provided as a list."
+        )
 
     recipients = []
     seen = set()
 
     for item in raw_recipients:
         address = recipient_address(item)
+
         if not address:
             continue
 
         key = address.lower()
+
         if key not in seen:
             seen.add(key)
             recipients.append(address)
 
     if not recipients:
-        return json_error("Please provide at least one valid recipient.")
+        return json_error(
+            "Please provide at least one valid recipient."
+        )
 
     if len(recipients) > MAX_RECIPIENTS:
         return json_error(
             f"Maximum {MAX_RECIPIENTS} recipients allowed per batch."
         )
 
-    invalid = [address for address in recipients if not valid_email(address)]
+    invalid = [
+        address
+        for address in recipients
+        if not valid_email(address)
+    ]
+
     if invalid:
         return json_error(
-            "Invalid email addresses: " + ", ".join(invalid[:5])
-        )
-
-    approved = configured_recipient_allowlist()
-    if not approved:
-        return json_error(
-            "No approved recipients configured. Add opted-in addresses to "
-            "the ALLOWED_RECIPIENTS Vercel environment variable.",
-            403
-        )
-
-    not_approved = [
-        address for address in recipients
-        if address.lower() not in approved
-    ]
-    if not_approved:
-        return json_error(
-            "These recipients are not in ALLOWED_RECIPIENTS: "
-            + ", ".join(not_approved[:5]),
-            403
+            "Invalid email addresses: "
+            + ", ".join(invalid[:5])
         )
 
     results = []
-    smtp = None
+
+    def send_recipient_group(group):
+        group_results = []
+        smtp = None
+
+        try:
+            smtp = create_smtp_connection(
+                sender_email,
+                app_password
+            )
+
+            for recipient in group:
+                attempts = 0
+                sent = False
+                last_error = "Unknown SMTP error"
+
+                while attempts < MAX_RETRIES and not sent:
+                    attempts += 1
+
+                    try:
+                        if smtp is None:
+                            smtp = create_smtp_connection(
+                                sender_email,
+                                app_password
+                            )
+
+                        time.sleep(random.uniform(0.02, 0.05))
+
+                        result = send_single_email(
+                            smtp=smtp,
+                            sender_email=sender_email,
+                            sender_name=sender_name,
+                            subject=subject,
+                            body=body,
+                            html_mode=html_mode,
+                            recipient=recipient
+                        )
+
+                        group_results.append(result)
+                        sent = True
+
+                    except smtplib.SMTPAuthenticationError:
+                        last_error = (
+                            "Gmail authentication failed. "
+                            "Check your Google App Password."
+                        )
+                        if smtp:
+                            try:
+                                smtp.quit()
+                            except Exception:
+                                pass
+                        smtp = None
+                        break
+
+                    except smtplib.SMTPRecipientsRefused:
+                        last_error = "Gmail refused this recipient address."
+                        break
+
+                    except smtplib.SMTPDataError as exc:
+                        code = getattr(exc, "smtp_code", 0)
+                        last_error = str(exc)[:200]
+
+                        if not (400 <= code < 500):
+                            break
+
+                        if smtp:
+                            try:
+                                smtp.quit()
+                            except Exception:
+                                pass
+                        smtp = None
+
+                        if attempts < MAX_RETRIES:
+                            time.sleep(0.4)
+
+                    except (
+                        smtplib.SMTPServerDisconnected,
+                        ConnectionError,
+                        TimeoutError,
+                        OSError
+                    ) as exc:
+                        last_error = str(exc)[:200]
+
+                        if smtp:
+                            try:
+                                smtp.close()
+                            except Exception:
+                                pass
+                        smtp = None
+
+                        if attempts < MAX_RETRIES:
+                            time.sleep(0.4)
+
+                    except Exception as exc:
+                        last_error = str(exc)[:200]
+                        break
+
+                if not sent:
+                    group_results.append({
+                        "status": "failed",
+                        "email": recipient,
+                        "detail": last_error
+                    })
+
+        except smtplib.SMTPAuthenticationError:
+            group_results.extend({
+                "status": "failed",
+                "email": recipient,
+                "detail": (
+                    "Gmail authentication failed. "
+                    "Check your Google App Password."
+                )
+            } for recipient in group)
+
+        except Exception as exc:
+            group_results.extend({
+                "status": "failed",
+                "email": recipient,
+                "detail": f"SMTP connection failed: {str(exc)[:180]}"
+            } for recipient in group)
+
+        finally:
+            if smtp:
+                try:
+                    smtp.quit()
+                except Exception:
+                    pass
+
+        return group_results
+
+    worker_count = min(MAX_WORKERS, len(recipients))
+    recipient_groups = [
+        recipients[index::worker_count]
+        for index in range(worker_count)
+    ]
 
     try:
-        smtp = create_smtp_connection(sender_email, app_password)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(send_recipient_group, group)
+                for group in recipient_groups
+            ]
 
-        for index, recipient in enumerate(recipients):
-            try:
-                result = send_single_email(
-                    smtp=smtp,
-                    sender_email=sender_email,
-                    sender_name=sender_name,
-                    subject=subject,
-                    body=body,
-                    html_mode=html_mode,
-                    recipient=recipient
-                )
-                results.append(result)
-
-            except smtplib.SMTPAuthenticationError:
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": "Gmail authentication failed. Check your Google App Password."
-                })
-                # Authentication failure affects the entire connection.
-                for remaining in recipients[index + 1:]:
+            for future in as_completed(futures):
+                try:
+                    results.extend(future.result())
+                except Exception as exc:
                     results.append({
                         "status": "failed",
-                        "email": remaining,
-                        "detail": "Not attempted because Gmail authentication failed."
+                        "email": "",
+                        "detail": f"Worker execution failed: {str(exc)[:200]}"
                     })
-                break
-
-            except smtplib.SMTPRecipientsRefused:
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": "Gmail refused this recipient address."
-                })
-
-            except smtplib.SMTPDataError as exc:
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": f"SMTP rejected the message ({getattr(exc, 'smtp_code', 'unknown')})."
-                })
-
-            except (smtplib.SMTPServerDisconnected, ConnectionError, TimeoutError, OSError) as exc:
-                # Do not automatically retry a disconnect after DATA:
-                # Gmail may already have accepted the message, so retrying
-                # could create a duplicate.
-                results.append({
-                    "status": "unknown",
-                    "email": recipient,
-                    "detail": (
-                        "Connection ended before acceptance could be confirmed. "
-                        "Check the sender's Sent folder before retrying. "
-                        + str(exc)[:120]
-                    )
-                })
-                for remaining in recipients[index + 1:]:
-                    results.append({
-                        "status": "failed",
-                        "email": remaining,
-                        "detail": "Not attempted because the SMTP connection was lost."
-                    })
-                break
-
-            except Exception as exc:
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": str(exc)[:200]
-                })
-
-            if index < len(recipients) - 1:
-                time.sleep(SEND_DELAY_SECONDS)
-
-    except smtplib.SMTPAuthenticationError:
-        results = [{
-            "status": "failed",
-            "email": recipient,
-            "detail": "Gmail authentication failed. Check your Google App Password."
-        } for recipient in recipients]
 
     except Exception as exc:
-        results = [{
-            "status": "failed",
-            "email": recipient,
-            "detail": f"SMTP connection failed: {str(exc)[:180]}"
-        } for recipient in recipients]
+        return jsonify({
+            "error": "Batch processing failed.",
+            "detail": str(exc)[:200],
+            "results": results
+        }), 502
 
-    finally:
-        if smtp:
-            try:
-                smtp.quit()
-            except Exception:
-                pass
+    result_order = {email: index for index, email in enumerate(recipients)}
+    results.sort(key=lambda item: result_order.get(item.get("email"), len(recipients)))
 
-    sent_count = sum(1 for item in results if item["status"] == "sent")
-    failed_count = sum(1 for item in results if item["status"] == "failed")
-    unknown_count = sum(1 for item in results if item["status"] == "unknown")
+    sent_count = sum(
+        1 for item in results
+        if item["status"] == "sent"
+    )
+
+    failed_count = sum(
+        1 for item in results
+        if item["status"] == "failed"
+    )
 
     return jsonify({
-        "success": failed_count == 0 and unknown_count == 0,
+        "success": failed_count == 0,
         "total": len(recipients),
         "accepted": sent_count,
         "failed": failed_count,
-        "unknown": unknown_count,
         "results": results
     }), 200
 
@@ -546,12 +686,18 @@ def send_batch():
 
 @app.errorhandler(413)
 def request_too_large(error):
-    return json_error("Request is too large.", 413)
+    return json_error(
+        "Request is too large.",
+        413
+    )
 
 
 @app.errorhandler(500)
 def internal_error(error):
-    return json_error("An internal server error occurred.", 500)
+    return json_error(
+        "An internal server error occurred.",
+        500
+    )
 
 
 # --------------------------------------------------
