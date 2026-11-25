@@ -48,9 +48,9 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
-SMTP_TIMEOUT = 25
-MAX_RECIPIENTS = 10
-SEND_INTERVAL_SECONDS = 0.90
+SMTP_TIMEOUT = 12
+MAX_RECIPIENTS = 5
+SEND_INTERVAL_SECONDS = 0.30
 
 
 # --------------------------------------------------
