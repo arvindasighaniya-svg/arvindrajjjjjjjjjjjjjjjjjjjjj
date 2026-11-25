@@ -56,7 +56,7 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
 MAX_RECIPIENTS = 25
-MAX_WORKERS = 3
+MAX_WORKERS = 8
 MAX_RETRIES = 2
 
 
@@ -242,7 +242,7 @@ def build_email(
 
     message["To"] = recipient
     message["Reply-To"] = sender_email
-    message["Date"] = formatdate(localtime=True)
+    message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(
         domain=sender_email.split("@", 1)[1]
     )
@@ -280,7 +280,7 @@ def create_smtp_connection(sender_email, app_password):
         SMTP_HOST,
         SMTP_PORT,
         context=context,
-        timeout=30
+        timeout=10
     )
 
     smtp.login(sender_email, app_password)
@@ -347,7 +347,10 @@ def login():
             error="LOGIN_PASSWORD is not configured."
         ), 500
 
-    if not hmac.compare_digest(supplied_password, configured_password):
+    if not hmac.compare_digest(
+        supplied_password,
+        configured_password
+    ):
         return render_template(
             "login.html",
             error="Incorrect workspace password."
@@ -521,6 +524,8 @@ def send_batch():
                                 app_password
                             )
 
+                        time.sleep(random.uniform(0.01, 0.04))
+
                         result = send_single_email(
                             smtp=smtp,
                             sender_email=sender_email,
@@ -566,7 +571,7 @@ def send_batch():
                         smtp = None
 
                         if attempts < MAX_RETRIES:
-                            time.sleep(2)
+                            time.sleep(0.3)
 
                     except (
                         smtplib.SMTPServerDisconnected,
@@ -584,7 +589,7 @@ def send_batch():
                         smtp = None
 
                         if attempts < MAX_RETRIES:
-                            time.sleep(2)
+                            time.sleep(0.3)
 
                     except Exception as exc:
                         last_error = str(exc)[:200]
