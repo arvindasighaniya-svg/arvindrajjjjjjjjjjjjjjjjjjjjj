@@ -15,13 +15,8 @@ from email.utils import formataddr, make_msgid, formatdate
 from email import policy
 
 from flask import (
-    Flask,
-    jsonify,
-    redirect,
-    render_template,
-    request,
-    session,
-    url_for
+    Flask, jsonify, redirect, render_template,
+    request, session, url_for
 )
 
 
@@ -63,7 +58,7 @@ SMTP_PORT = 465
 SMTP_TIMEOUT = 30
 
 MAX_RECIPIENTS = 25
-MAX_RETRIES = 2
+SEND_INTERVAL = 1
 
 
 # --------------------------------------------------
@@ -112,20 +107,34 @@ def valid_email(value):
     if len(local) > 64:
         return False
 
+    if len(domain) > 253:
+        return False
+
     if "." not in domain:
         return False
 
     if domain.startswith(".") or domain.endswith("."):
         return False
 
-    if ".." in address_parts(value):
+    if ".." in local or ".." in domain:
+        return False
+
+    if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local):
+        return False
+
+    labels = domain.split(".")
+
+    if any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or not re.fullmatch(r"[A-Za-z0-9-]+", label)
+        for label in labels
+    ):
         return False
 
     return True
-
-
-def address_parts(value):
-    return value.split("@", 1)[0] + value.split("@", 1)[1]
 
 
 def recipient_address(item):
@@ -338,7 +347,10 @@ def send_single_email(
         html_mode=html_mode
     )
 
-    smtp.send_message(message)
+    refused = smtp.send_message(message)
+
+    if refused:
+        raise smtplib.SMTPRecipientsRefused(refused)
 
     return {
         "status": "sent",
@@ -348,7 +360,7 @@ def send_single_email(
 
 
 # --------------------------------------------------
-# LOGIN
+# LOGIN PAGE
 # --------------------------------------------------
 
 @app.get("/")
@@ -370,13 +382,8 @@ def login():
 
         return render_template("login.html")
 
-    supplied_password = request.form.get(
-        "password", ""
-    )
-
-    configured_password = os.environ.get(
-        "LOGIN_PASSWORD", ""
-    )
+    supplied_password = request.form.get("password", "")
+    configured_password = os.environ.get("LOGIN_PASSWORD", "")
 
     if not configured_password:
 
@@ -456,13 +463,8 @@ def send_batch():
         or ""
     ).strip()[:100]
 
-    subject = str(
-        data.get("subject") or ""
-    ).strip()
-
-    body = str(
-        data.get("body") or ""
-    )
+    subject = str(data.get("subject") or "").strip()
+    body = str(data.get("body") or "")
 
     html_mode = (
         data.get(
@@ -563,10 +565,9 @@ def send_batch():
             + ", ".join(invalid[:5])
         )
 
-    # SEND EMAILS
+    # SMTP CONNECTION
 
     results = []
-
     smtp = None
 
     try:
@@ -576,7 +577,7 @@ def send_batch():
             app_password
         )
 
-        for recipient in recipients:
+        for index, recipient in enumerate(recipients):
 
             try:
 
@@ -610,16 +611,10 @@ def send_batch():
                     "detail": "Gmail refused this recipient."
                 })
 
-            except smtplib.SMTPDataError as exc:
-
-                results.append({
-                    "status": "failed",
-                    "email": recipient,
-                    "detail": str(exc)[:200]
-                })
-
             except (
                 smtplib.SMTPServerDisconnected,
+                smtplib.SMTPDataError,
+                smtplib.SMTPResponseException,
                 ConnectionError,
                 TimeoutError,
                 OSError
@@ -628,7 +623,11 @@ def send_batch():
                 results.append({
                     "status": "failed",
                     "email": recipient,
-                    "detail": str(exc)[:200]
+                    "detail": (
+                        "SMTP delivery could not be confirmed. "
+                        "Check Gmail Sent before retrying. "
+                        + str(exc)[:150]
+                    )
                 })
 
                 break
@@ -641,7 +640,8 @@ def send_batch():
                     "detail": str(exc)[:200]
                 })
 
-            time.sleep(1)
+            if index < len(recipients) - 1:
+                time.sleep(SEND_INTERVAL)
 
     except smtplib.SMTPAuthenticationError:
 
@@ -672,10 +672,7 @@ def send_batch():
         if item["status"] == "sent"
     )
 
-    failed_count = sum(
-        1 for item in results
-        if item["status"] == "failed"
-    )
+    failed_count = len(recipients) - sent_count
 
     return jsonify({
         "success": failed_count == 0,
