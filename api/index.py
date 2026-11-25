@@ -78,10 +78,13 @@ MAX_RETRIES = 2
 RETRY_DELAY = 2
 
 # Optional minimum delay between messages.
-SEND_INTERVAL = max(
-    0.0,
-    float(os.environ.get("SEND_INTERVAL_SECONDS", "0.2"))
-)
+try:
+    SEND_INTERVAL = max(
+        0.0,
+        float(os.environ.get("SEND_INTERVAL_SECONDS", "0.2"))
+    )
+except (TypeError, ValueError):
+    SEND_INTERVAL = 0.2
 
 
 # ==================================================
@@ -854,18 +857,45 @@ def send_batch():
             f"Maximum {MAX_RECIPIENTS} recipients allowed per batch."
         )
 
-    # Verify that every recipient explicitly opted in.
-    # The frontend consent checkbox alone is not proof of consent.
+    # Server-side recipient authorization.
     #
-    # For production, connect this check to a server-side
-    # subscriber database and verify each address there.
+    # ALLOWED_RECIPIENTS must contain only addresses whose owners
+    # have explicitly opted in to receive these messages.
+    # Example Vercel value:
+    # ALLOWED_RECIPIENTS=person1@example.com,person2@example.com
+    #
+    # A browser checkbox is not treated as proof of consent.
 
-    if os.environ.get("REQUIRE_SERVER_SIDE_CONSENT", "1") == "1":
+    configured_recipients = os.environ.get(
+        "ALLOWED_RECIPIENTS",
+        ""
+    )
 
+    allowed_recipients = {
+        clean_email(address).lower()
+        for address in configured_recipients.split(",")
+        if clean_email(address) and valid_email(clean_email(address))
+    }
+
+    if not allowed_recipients:
         return json_error(
-            "Server-side recipient consent verification must be implemented before sending.",
+            "No opted-in recipients are configured. Add consented addresses to the ALLOWED_RECIPIENTS Vercel environment variable.",
             403
         )
+
+    unauthorized_recipients = [
+        address
+        for address in recipients
+        if address.lower() not in allowed_recipients
+    ]
+
+    if unauthorized_recipients:
+        return jsonify({
+            "success": False,
+            "error": "Some recipients are not on the server-side opted-in list.",
+            "unauthorized": unauthorized_recipients[:10],
+            "total_unauthorized": len(unauthorized_recipients)
+        }), 403
 
     # Sequential processing
 
