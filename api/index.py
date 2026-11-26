@@ -242,7 +242,7 @@ def build_email(
 
     message["To"] = recipient
     message["Reply-To"] = sender_email
-    message["Date"] = formatdate(localtime=True)
+    message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(
         domain=sender_email.split("@", 1)[1]
     )
