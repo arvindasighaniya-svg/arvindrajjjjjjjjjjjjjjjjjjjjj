@@ -68,7 +68,7 @@ def get_allowed_recipients():
     raw = os.environ.get("ALLOWED_RECIPIENTS", "")
     return {
         clean_email(address).casefold()
-        for address in re.split(r"[,;\\n]+", raw)
+        for address in re.split(r"[,;\r\n]+", raw)
         if clean_email(address)
     }
 
@@ -422,7 +422,7 @@ def send_batch():
     if not allowed_recipients:
         return json_error(
             "No opted-in recipients are configured. Add confirmed opt-in addresses "
-            "to the ALLOWED_RECIPIENTS Vercel environment variable.",
+            "to the ALLOWED_RECIPIENTS Vercel environment variable, then redeploy.",
             403
         )
 
