@@ -62,16 +62,6 @@ MAX_WORKERS = 3
 MAX_SAFE_RETRIES = 2
 RETRY_BASE_DELAY = 1.0
 
-# Server-side list of recipients who have explicitly opted in.
-# Configure ALLOWED_RECIPIENTS in Vercel as comma-separated email addresses.
-def get_allowed_recipients():
-    raw = os.environ.get("ALLOWED_RECIPIENTS", "")
-    return {
-        clean_email(address).casefold()
-        for address in re.split(r"[,;\r\n]+", raw)
-        if clean_email(address)
-    }
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mail_sender")
 
@@ -99,7 +89,7 @@ def clean_text(value, limit=None):
         if ch.isprintable() and not unicodedata.category(ch).startswith("C")
     )
     value = value.strip()
-    return value[:limit] if limit else value 
+    return value[:limit] if limit else value
 
 
 def clean_email(value):
@@ -158,7 +148,6 @@ _SPINTAX_PATTERN = re.compile(r"\{([^{}]+)\}")
 
 def expand_spintax(value):
     value = str(value or "")
-    # Bound substitutions to avoid pathological input.
     for _ in range(100):
         match = _SPINTAX_PATTERN.search(value)
         if not match:
@@ -209,8 +198,6 @@ def build_email(sender_email, sender_name, recipient, subject, body, html_mode=F
     message["To"] = recipient
     message["Reply-To"] = sender_email
     message["Date"] = formatdate(localtime=False)
-    message["Auto-Submitted"] = "no"
-    message["X-Auto-Response-Suppress"] = "All"
     message["Message-ID"] = make_msgid(
         domain=sender_email.rsplit("@", 1)[1]
     )
@@ -290,7 +277,7 @@ def send_single_email(smtp, sender_email, sender_name, subject, body,
     return {
         "status": "sent",
         "email": recipient,
-        "detail": "Accepted by Gmail SMTP; inbox placement is not guaranteed."
+        "detail": "Accepted by Gmail SMTP"
     }
 
 
@@ -387,7 +374,7 @@ def send_batch():
         return json_error("Email message body is required.")
     if not consent:
         return json_error(
-            "Confirm that every recipient explicitly opted in to receive these emails."
+            "Confirm that all recipients have consented to receive these emails."
         )
     if not isinstance(raw_recipients, list):
         return json_error("Recipients must be provided as a list.")
@@ -418,27 +405,6 @@ def send_batch():
             "Invalid email addresses: " + ", ".join(invalid[:5])
         )
 
-    allowed_recipients = get_allowed_recipients()
-    if not allowed_recipients:
-        return json_error(
-            "No opted-in recipients are configured. Add confirmed opt-in addresses "
-            "to the ALLOWED_RECIPIENTS Vercel environment variable, then redeploy.",
-            403
-        )
-
-    not_approved = [
-        address for address in recipients
-        if address.casefold() not in allowed_recipients
-    ]
-    if not_approved:
-        return json_error(
-            "These recipients are not on the server-side opt-in allowlist: "
-            + ", ".join(not_approved[:5]),
-            403
-        )
-
-    # Keep the original three-worker approach. Each SMTP connection is owned
-    # by exactly one worker and is never shared between threads.
     worker_count = min(MAX_WORKERS, len(recipients))
     recipient_groups = [
         recipients[index::worker_count] for index in range(worker_count)
@@ -495,8 +461,6 @@ def send_batch():
                     except smtplib.SMTPDataError as exc:
                         code = getattr(exc, "smtp_code", 0)
                         detail = clean_text(str(exc), 220)
-                        # Explicit 4xx DATA rejection means the message was
-                        # rejected; reconnect and retry with bounded backoff.
                         if 400 <= code < 500 and attempts <= MAX_SAFE_RETRIES:
                             close_smtp(smtp)
                             smtp = None
@@ -510,10 +474,7 @@ def send_batch():
                         break
 
                     except (smtplib.SMTPServerDisconnected, ConnectionError,
-                            TimeoutError, OSError) as exc:
-                        # Delivery may have been accepted before the socket
-                        # dropped. Do not resend automatically: that could
-                        # send a duplicate. Mark it as uncertain instead.
+                            TimeoutError, OSError):
                         close_smtp(smtp)
                         smtp = None
                         result = {
