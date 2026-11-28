@@ -89,7 +89,7 @@ def clean_text(value, limit=None):
         if ch.isprintable() and not unicodedata.category(ch).startswith("C")
     )
     value = value.strip()
-    return value[:limit] if limit else value
+    return value[:limit] if limit else value 
 
 
 def clean_email(value):
