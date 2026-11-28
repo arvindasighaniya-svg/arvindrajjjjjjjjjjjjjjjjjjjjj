@@ -104,8 +104,6 @@ def html_to_plain_text(value):
 
 
 def build_email(sender_email, sender_name, recipient, subject, body, html_mode=False):
-    # Deliberately do not randomize/spin message text. Send the content the
-    # sender actually entered, with only basic recipient personalization.
     local_part = recipient.split("@", 1)[0]
     display_name = re.sub(r"[._-]+", " ", local_part).strip().title() or local_part
     personalized_body = (
@@ -121,7 +119,7 @@ def build_email(sender_email, sender_name, recipient, subject, body, html_mode=F
     message["From"] = formataddr((safe_sender_name, sender_email)) if safe_sender_name else sender_email
     message["To"] = recipient
     message["Reply-To"] = sender_email
-    message["Date"] = formatdate(localtime=True)
+    message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(domain=sender_email.rsplit("@", 1)[1])
 
     if html_mode:
@@ -248,9 +246,6 @@ def send_batch():
     results = []
     smtp = None
     try:
-        # One authenticated connection, one recipient per message, and a
-        # deliberate delay. No parallel burst and no automatic resend after
-        # an uncertain SMTP result (which could create duplicate mail).
         smtp = create_smtp_connection(sender_email, app_password)
         for index, recipient in enumerate(recipients):
             if index:
@@ -268,7 +263,7 @@ def send_batch():
                     results.append({
                         "status": "sent",
                         "email": recipient,
-                        "detail": "Accepted by Gmail; Inbox placement is not confirmed.",
+                        "detail": "Accepted by Gmail SMTP",
                     })
             except smtplib.SMTPAuthenticationError:
                 results.append({"status": "failed", "email": recipient, "detail": "Gmail authentication failed. Check your Google App Password."})
@@ -281,7 +276,6 @@ def send_batch():
                 if code >= 500:
                     break
             except (smtplib.SMTPServerDisconnected, ConnectionError, TimeoutError, OSError) as exc:
-                # Delivery may have occurred if the connection failed after DATA.
                 results.append({"status": "delivery_unknown", "email": recipient, "detail": "Connection ended during sending. Check before retrying to avoid a duplicate."})
                 logger.warning("SMTP connection issue for %s: %s", recipient, exc)
                 break
