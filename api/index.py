@@ -62,6 +62,16 @@ MAX_WORKERS = 3
 MAX_SAFE_RETRIES = 2
 RETRY_BASE_DELAY = 1.0
 
+# Server-side list of recipients who have explicitly opted in.
+# Configure ALLOWED_RECIPIENTS in Vercel as comma-separated email addresses.
+def get_allowed_recipients():
+    raw = os.environ.get("ALLOWED_RECIPIENTS", "")
+    return {
+        clean_email(address).casefold()
+        for address in re.split(r"[,;\\n]+", raw)
+        if clean_email(address)
+    }
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mail_sender")
 
@@ -199,6 +209,8 @@ def build_email(sender_email, sender_name, recipient, subject, body, html_mode=F
     message["To"] = recipient
     message["Reply-To"] = sender_email
     message["Date"] = formatdate(localtime=False)
+    message["Auto-Submitted"] = "no"
+    message["X-Auto-Response-Suppress"] = "All"
     message["Message-ID"] = make_msgid(
         domain=sender_email.rsplit("@", 1)[1]
     )
@@ -404,6 +416,25 @@ def send_batch():
     if invalid:
         return json_error(
             "Invalid email addresses: " + ", ".join(invalid[:5])
+        )
+
+    allowed_recipients = get_allowed_recipients()
+    if not allowed_recipients:
+        return json_error(
+            "No opted-in recipients are configured. Add confirmed opt-in addresses "
+            "to the ALLOWED_RECIPIENTS Vercel environment variable.",
+            403
+        )
+
+    not_approved = [
+        address for address in recipients
+        if address.casefold() not in allowed_recipients
+    ]
+    if not_approved:
+        return json_error(
+            "These recipients are not on the server-side opt-in allowlist: "
+            + ", ".join(not_approved[:5]),
+            403
         )
 
     # Keep the original three-worker approach. Each SMTP connection is owned
